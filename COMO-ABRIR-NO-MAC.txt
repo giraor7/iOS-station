@@ -34,6 +34,16 @@ copie-os da pasta anterior para a nova.
 
 Para não baixar mais zip
 ------------------------
-A pasta já vem com atualizar.command: quando a estação estiver num repositório
-git, dois cliques nele puxam a versão nova e abrem a interface, sem download,
-sem quarentena e sem copiar .venv. Peça o link de "git clone" para ativar.
+A estação vive num repositório privado no GitHub. Uma vez só, no Terminal:
+
+    cd ~/Trabalho/"Marcelo Queiroz"
+    git clone https://github.com/giraor7/iOS-station.git ios-station
+    cp -R V-15.5-ios-station/.venv ios-station/      # reaproveita o ambiente
+
+(o GitHub vai pedir login: aceite o convite de colaborador que chegou por
+e-mail e entre com sua conta; se pedir senha, use um token do GitHub ou faça
+login pelo app GitHub Desktop antes).
+
+Daí em diante, cada atualização é só dois cliques em atualizar.command: ele
+puxa a versão nova, instala o que faltar e abre a estação. Sem download, sem
+quarentena, sem copiar nada.
