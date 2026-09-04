@@ -1,0 +1,4 @@
+Appium-Python-Client>=4.0,<5.0
+selenium>=4.20,<5.0
+phonenumbers>=8.13
+customtkinter>=5.2

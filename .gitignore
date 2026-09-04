@@ -1,0 +1,13 @@
+# ambiente e caches locais
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+# dados da operacao: nunca versionar (progresso, agenda, erros com textos de tela)
+progress*.json
+inventory-erro.json
+*.vcf
+*.csv
+!contacts.example.csv
+*_estacao.csv
+*_gui_tmp.csv

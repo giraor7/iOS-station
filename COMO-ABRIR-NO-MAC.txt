@@ -1,0 +1,39 @@
+COMO ABRIR A ESTAÇÃO iOS NO MAC (leia uma vez)
+================================================
+
+Por que o Mac reclama
+---------------------
+Tudo que chega pelo navegador recebe a marca "quarentena" do macOS. Ao abrir o
+iniciar_gui.command, o Finder diz que "não é possível verificar o desenvolvedor".
+Não é problema no arquivo: é o macOS avisando que veio da internet.
+
+Primeira abertura de cada versão baixada (só uma vez)
+-----------------------------------------------------
+1. Descompacte o zip. Vai aparecer a pasta ios-station.
+2. Clique com o BOTÃO DIREITO em iniciar_gui.command e escolha "Abrir".
+3. Na janela de aviso, clique em "Abrir" de novo.
+
+Pronto. O atalho remove a marca de quarentena da pasta inteira; daí em diante
+abre com dois cliques normais.
+
+Alternativa pelo Terminal (mesmo efeito):
+    xattr -dr com.apple.quarantine ~/Downloads/ios-station
+
+Ambiente Python (.venv)
+-----------------------
+O zip não traz o .venv de propósito (é grande e é do seu Mac). Duas opções:
+  a) copie a pasta .venv da versão anterior para dentro da nova pasta; ou
+  b) deixe o iniciar_gui.command instalar o que faltar na primeira abertura
+     (precisa de internet e leva 1 a 2 minutos).
+
+Progresso das listas
+--------------------
+O arquivo progress.scroll.local.json (Scroll Livre) e progress.ios.local.json
+(modo arquivo) também ficam fora do zip. Se quiser continuar de onde parou,
+copie-os da pasta anterior para a nova.
+
+Para não baixar mais zip
+------------------------
+A pasta já vem com atualizar.command: quando a estação estiver num repositório
+git, dois cliques nele puxam a versão nova e abrem a interface, sem download,
+sem quarentena e sem copiar .venv. Peça o link de "git clone" para ativar.
