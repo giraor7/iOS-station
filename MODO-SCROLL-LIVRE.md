@@ -164,7 +164,7 @@ automação de interface. O que existe é cortar chamadas desperdiçadas:
 | Modo | Chamadas ao iPhone | Estimativa por lista de 256 |
 |---|---|---|
 | Arquivo (CSV/VCF) até a V15 | ~28 por contato | 15 a 20 min |
-| Arquivo (CSV/VCF) agora | ~9 por contato + 0,85 s de pausas (Turbo) | 6 a 8 min |
+| Arquivo (CSV/VCF) agora | ~6 por contato + 0,85 s de pausas (Turbo) | 5,5 a 7 min |
 | Arquivo (CSV/VCF), preset Máximo | ~9 por contato + 0,6 s de pausas | 5 a 7 min |
 | Scroll Livre até a V14 | ~44 por tela | ~4 min |
 | Scroll Livre agora (padrão) | ~13 por tela | ~1,5 min |
@@ -172,6 +172,11 @@ automação de interface. O que existe é cortar chamadas desperdiçadas:
 
 De onde saiu o ganho, sem afrouxar trava nenhuma:
 
+- **Modo arquivo (3ª rodada)**: checagens de segurança (compositor e app em
+  primeiro plano) a cada 8 contatos, como no Scroll Livre — a célula "Convidar"
+  já é barrada antes do toque; conferência do número em 1 chamada (textos das
+  células e dos telefones vêm na própria resposta da busca), com volta
+  automática ao caminho célula a célula se o driver não devolver.
 - **Modo arquivo (2ª rodada)**: o campo de busca é reaproveitado entre contatos (1 busca a menos); um "não encontrado" não sobe mais a profundidade 14→16→18 (até 8 chamadas) — a profundidade do seletor não muda dentro da lista; a linha "Convidar" é barrada ANTES do clique lendo o rótulo, o que permitiu encurtar a pausa depois do clique (de 1,5×ritmo para 0,5×ritmo). Preset **Máximo** em Configurações leva as pausas ao piso do runner (0,375 s após digitar): use só depois de medir.
 - **Modo arquivo (1ª rodada)**: a trava do compositor de mensagem fazia até 8 consultas
   por contato (uma por rótulo); agora é 1 consulta com o mesmo critério. A

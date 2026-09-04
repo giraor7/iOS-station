@@ -110,6 +110,16 @@ class IosSpike:
         # Campo de busca do picker, reaproveitado entre contatos (1 busca a menos
         # por contato). Refeito quando o elemento expira ou o picker reabre.
         self._search_box = None
+        # Checagens de seguranca (compositor, app em primeiro plano) a cada N
+        # contatos, nao a cada um: a celula "Convidar" — motivo original delas —
+        # ja e barrada ANTES do toque pelo rotulo. Comeca "vencido" para checar
+        # no 1o contato de cada lista.
+        self._CHECAR_INTERVALO = 8
+        self._contatos_desde_check = self._CHECAR_INTERVALO
+        # Textos das celulas vindos na propria resposta da busca
+        # (elementResponseAttributes). None = ainda nao se sabe se o driver honra.
+        self._attrs_ok: bool | None = None
+        self._rotulos_celulas: list | None = None
 
     # ---------------- infra ----------------
 
@@ -249,6 +259,7 @@ class IosSpike:
         # Cada lista abre um picker novo: o que foi cacheado no anterior expirou.
         self._depth_ok = None
         self._search_box = None
+        self._contatos_desde_check = self._CHECAR_INTERVALO
         # A sessao abre VAZIA (autoLaunch=False). Ativa o WhatsApp apenas se
         # ele nao estiver ja em frente — chamar activate_app com o app ja ativo
         # pode causar Code=41 em sessoes WDA degradadas apos crash.
@@ -441,7 +452,7 @@ class IosSpike:
             # A profundidade em que as celulas apareceram neste picker nao muda:
             # lista vazia aqui e "nao encontrado" de verdade. Antes, cada
             # "nao encontrado" subia 14->16->18 (ate 8 chamadas) para nada.
-            return self.find_all("contact_cell")
+            return self._find_cells_com_rotulos()
         for depth in (12, 14, 16, 18):
             if depth == self._depth_ok:
                 continue   # ja consultada acima
@@ -458,6 +469,61 @@ class IosSpike:
         self._restore_depth()
         return []
 
+    def _find_raw(self, accessibility_id: str):
+        """Busca pontual crua: devolve [(elemento, label)] lendo o rotulo da
+        propria resposta (elementResponseAttributes), ou None se o driver nao
+        devolveu os atributos / nao aceitou a chamada."""
+        if self._attrs_ok is False:
+            return None
+        try:
+            resp = self.d.execute("findElements", {"using": "accessibility id",
+                                                   "value": accessibility_id})
+        except Exception:                    # driver falso nos testes, WDA antigo...
+            self._attrs_ok = False
+            return None
+        itens = (resp or {}).get("value") or []
+        out = []
+        for it in itens:
+            if not isinstance(it, dict) or ("label" not in it and "name" not in it
+                                            and "value" not in it):
+                self._attrs_ok = False
+                return None
+            eid = it.get("element-6066-11e4-a52e-4f735466cecf") or it.get("ELEMENT")
+            if not eid:
+                self._attrs_ok = False
+                return None
+            rotulo = (it.get("label") or it.get("name") or it.get("value") or "").strip()
+            out.append((self.d.create_web_element(eid), rotulo))
+        self._attrs_ok = True
+        return out
+
+    def _find_cells_com_rotulos(self) -> list:
+        """Celulas do picker; quando o driver devolve os rotulos na resposta,
+        guarda-os alinhados em self._rotulos_celulas (0 chamadas extras)."""
+        sel = self.p.selectors.get("contact_cell")
+        cru = self._find_raw(sel.accessibility_id) if sel and sel.accessibility_id else None
+        if cru is None:
+            self._rotulos_celulas = None
+            return self.find_all("contact_cell")
+        self._rotulos_celulas = [r for _, r in cru]
+        return [el for el, _ in cru]
+
+    def _textos_em_lote(self, cells) -> tuple[list, list] | None:
+        """(telefones, rotulos) alinhados com `cells`, em UMA chamada para os
+        telefones (os rotulos ja vieram com as celulas). None => usar o caminho
+        celula a celula. Exige contagem igual: cada celula tem seu StaticText de
+        telefone/recado (confirmado no iPhone); se nao bater, nao arrisca."""
+        rotulos = self._rotulos_celulas
+        if not rotulos or len(rotulos) != len(cells):
+            return None
+        sel = self.p.selectors.get("contact_phone")
+        if not sel or not sel.accessibility_id:
+            return None
+        cru = self._find_raw(sel.accessibility_id)
+        if cru is None or len(cru) != len(cells):
+            return None
+        return [r for _, r in cru], list(rotulos)
+
     def _restore_depth(self) -> None:
         try:
             self.d.update_settings({"snapshotMaxDepth": 12})
@@ -466,7 +532,14 @@ class IosSpike:
 
     def search_and_select(self, e164: str | None, name: str | None, label: str) -> None:
         self.transition(State.SEARCHING)
-        self.assert_no_composer()
+        # Periodica: 1 vez a cada _CHECAR_INTERVALO contatos (e no 1o de cada
+        # lista). Se o seletor sumir no meio, a busca seguinte ja falha sozinha
+        # (campo de busca nao encontrado => UiChanged) — a trava nao depende disto.
+        self._contatos_desde_check += 1
+        checar = self._contatos_desde_check >= self._CHECAR_INTERVALO
+        if checar:
+            self._contatos_desde_check = 0
+            self.assert_no_composer()
         query = e164 or name or ""
 
         self.transition(State.MATCHING)
@@ -503,8 +576,9 @@ class IosSpike:
 
         # SEGURANCA: verifica se ainda estamos no WhatsApp. Se o clique abriu
         # o app de Mensagens (celula 'Convidar para WhatsApp' passou pelos filtros),
-        # volta ao WhatsApp automaticamente e descarta o contato.
-        if not self._whatsapp_in_front():
+        # volta ao WhatsApp automaticamente e descarta o contato. Periodica
+        # (mesmo ritmo da checagem do compositor): o convite ja e barrado antes.
+        if checar and not self._whatsapp_in_front():
             log.warning(
                 "caso %s: clique saiu do WhatsApp (app externo abriu — "
                 "'Convidar para WhatsApp'?) — voltando ao WhatsApp", label
@@ -556,6 +630,26 @@ class IosSpike:
         """Match EXATO: numero normalizado igual OU nome exatamente igual.
         Nunca aceita 'contem' — foi a fragilidade das referencias auditadas."""
         out = []
+        lote = self._textos_em_lote(cells)
+        if lote is not None:
+            # CAMINHO RAPIDO: mesmas regras, textos ja em maos (1 chamada no
+            # total, em vez de 3 por celula). Convite barrado pelo rotulo.
+            fones, rotulos = lote
+            for c, fone, rot in zip(cells, fones, rotulos):
+                baixa = rot.lower()
+                if "convidar" in baixa or "invite" in baixa:
+                    continue
+                if e164 and fone:
+                    if self._to_e164(fone) == e164:
+                        out.append(c)
+                    continue          # tinha numero e nao bateu: nao e este contato
+                if not rot:
+                    continue
+                if e164 and self._to_e164(rot) == e164:
+                    out.append(c)
+                elif name and rot == name.strip():
+                    out.append(c)
+            return out
         for c in cells:
             if e164:
                 # PREFERENCIA: o numero fica num StaticText proprio dentro da
@@ -754,6 +848,10 @@ def build_driver(server: str, wda_bundle: str | None, *,
             "waitForIdleTimeout": 0,
             "animationCoolOffTimeout": 0,
             "typingFrequency": 200,   # 13 caracteres em ~0,07 s (padrao 60/s = 0,2 s)
+            # Rotulos na propria resposta das buscas pontuais: conferir o numero
+            # de um contato passa a custar 1 chamada, nao 3 por celula.
+            "elementResponseAttributes": "name,label,value,rect",
+            "shouldUseCompactResponses": False,
             "useJSONSource": True,
             "pageSourceExcludedAttributes": "visible,accessible,frame,index",
         })
