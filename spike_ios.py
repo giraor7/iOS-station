@@ -114,7 +114,11 @@ class IosSpike:
         # contatos, nao a cada um: a celula "Convidar" — motivo original delas —
         # ja e barrada ANTES do toque pelo rotulo. Comeca "vencido" para checar
         # no 1o contato de cada lista.
-        self._CHECAR_INTERVALO = 8
+        # LL_RAPIDO=1 liga o modo experimental (checagens a cada 8 contatos,
+        # rotulos na resposta da busca). Desligado: checa a CADA contato e le
+        # celula a celula — o comportamento que criou listas no iPhone.
+        self.rapido = os.environ.get("LL_RAPIDO") == "1"
+        self._CHECAR_INTERVALO = 8 if self.rapido else 1
         self._contatos_desde_check = self._CHECAR_INTERVALO
         # Textos das celulas vindos na propria resposta da busca
         # (elementResponseAttributes). None = ainda nao se sabe se o driver honra.
@@ -473,15 +477,28 @@ class IosSpike:
         """Busca pontual crua: devolve [(elemento, label)] lendo o rotulo da
         propria resposta (elementResponseAttributes), ou None se o driver nao
         devolveu os atributos / nao aceitou a chamada."""
-        if self._attrs_ok is False:
+        if self._attrs_ok is False or not self.rapido:
             return None
         try:
-            resp = self.d.execute("findElements", {"using": "accessibility id",
-                                                   "value": accessibility_id})
+            # Resposta CRUA: driver.execute() converte os itens em WebElement e
+            # descarta os atributos; o executor de comandos devolve o JSON puro.
+            executor = getattr(self.d, "command_executor", None)
+            params = {"using": "accessibility id", "value": accessibility_id}
+            if executor is not None and hasattr(executor, "execute"):
+                resp = executor.execute("findElements",
+                                        {"sessionId": self.d.session_id, **params})
+            else:
+                resp = self.d.execute("findElements", params)
         except Exception:                    # driver falso nos testes, WDA antigo...
             self._attrs_ok = False
             return None
-        itens = (resp or {}).get("value") or []
+        if not isinstance(resp, dict) or resp.get("status") not in (None, 0):
+            self._attrs_ok = False
+            return None
+        itens = resp.get("value") or []
+        if isinstance(itens, dict):          # erro W3C vem como {"error": ...}
+            self._attrs_ok = False
+            return None
         out = []
         for it in itens:
             if not isinstance(it, dict) or ("label" not in it and "name" not in it
@@ -847,11 +864,13 @@ def build_driver(server: str, wda_bundle: str | None, *,
             "customSnapshotTimeout": 15,
             "waitForIdleTimeout": 0,
             "animationCoolOffTimeout": 0,
-            "typingFrequency": 200,   # 13 caracteres em ~0,07 s (padrao 60/s = 0,2 s)
-            # Rotulos na propria resposta das buscas pontuais: conferir o numero
-            # de um contato passa a custar 1 chamada, nao 3 por celula.
-            "elementResponseAttributes": "name,label,value,rect",
-            "shouldUseCompactResponses": False,
+            # EXPERIMENTAL (LL_RAPIDO=1): digitacao a 200 chars/s e rotulos na
+            # propria resposta das buscas. Desligado por padrao: uma rodada com
+            # isto ligado deixou contatos sem selecionar no iPhone (em apuracao).
+            **({"typingFrequency": 200,
+                "elementResponseAttributes": "name,label,value,rect",
+                "shouldUseCompactResponses": False}
+               if os.environ.get("LL_RAPIDO") == "1" else {}),
             "useJSONSource": True,
             "pageSourceExcludedAttributes": "visible,accessible,frame,index",
         })

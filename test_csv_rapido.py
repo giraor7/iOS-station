@@ -11,6 +11,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+os.environ["LL_RAPIDO"] = "1"      # estes testes exercitam o modo experimental
 
 from ios_selectors import BASELINE  # noqa: E402
 import spike_ios  # noqa: E402
@@ -54,6 +55,8 @@ class Driver:
         self.atributos = atributos
         self.fones_a_menos = fones_a_menos
         self.chamadas = []
+        self.session_id = "sessao-falsa"
+        self.command_executor = self      # como o cliente real: executor com execute()
 
     def create_web_element(self, eid):
         return self.cels[int(eid.split("-")[1])]
@@ -133,6 +136,21 @@ class CaminhoRapido(unittest.TestCase):
         sp, d = spike([])
         self.assertEqual(sp._contatos_desde_check, sp._CHECAR_INTERVALO)
         self.assertEqual(sp._CHECAR_INTERVALO, 8)
+
+    def test_sem_a_chave_o_comportamento_e_o_validado(self):
+        """LL_RAPIDO desligado: checa a cada contato e nao usa a resposta crua."""
+        os.environ.pop("LL_RAPIDO", None)
+        try:
+            cels = [Cel("Ana", "(21) 99999-0001")]
+            sp, d = spike(cels)
+            self.assertFalse(sp.rapido)
+            self.assertEqual(sp._CHECAR_INTERVALO, 1)
+            achadas = sp._find_cells_escalating()
+            self.assertIsNone(sp._rotulos_celulas)
+            self.assertEqual([c for c in d.chamadas if c[0] == "raw"], [])
+            self.assertEqual(sp._exact_matches(achadas, "+5521999990001", None), [cels[0]])
+        finally:
+            os.environ["LL_RAPIDO"] = "1"
 
 
 if __name__ == "__main__":
