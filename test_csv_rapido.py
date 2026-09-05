@@ -50,25 +50,34 @@ class FoneEl:
 
 
 class Driver:
-    def __init__(self, cels, atributos=True, fones_a_menos=0):
+    def __init__(self, cels, atributos=True, fones_a_menos=0, profundidade_necessaria=14):
         self.cels = cels
         self.atributos = atributos
         self.fones_a_menos = fones_a_menos
         self.chamadas = []
         self.session_id = "sessao-falsa"
         self.command_executor = self      # como o cliente real: executor com execute()
+        # As celulas do picker so aparecem a partir de certa profundidade da
+        # arvore — e ela MUDA depois do 1o contato marcado (faixa de selecionados).
+        self.profundidade = 12
+        self.profundidade_necessaria = profundidade_necessaria
+
+    def _enxerga(self):
+        return self.profundidade >= self.profundidade_necessaria
 
     def create_web_element(self, eid):
         return self.cels[int(eid.split("-")[1])]
 
     def find_elements(self, by, val):
-        self.chamadas.append(("find", val))
-        return list(self.cels) if val == CELL_ID else []
+        self.chamadas.append(("find", val, self.profundidade))
+        return list(self.cels) if val == CELL_ID and self._enxerga() else []
 
     def execute(self, cmd, params):
-        self.chamadas.append(("raw", params["value"]))
+        self.chamadas.append(("raw", params["value"], self.profundidade))
         if cmd != "findElements":
             raise Exception("nao suportado")
+        if not self._enxerga():
+            return {"value": []}
         if params["value"] == CELL_ID:
             itens = []
             for i, c in enumerate(self.cels):
@@ -84,14 +93,50 @@ class Driver:
         return {"value": itens}
 
     def update_settings(self, s):
-        pass
+        if "snapshotMaxDepth" in s:
+            self.profundidade = int(s["snapshotMaxDepth"])
 
 
 def spike(cels, **kw):
     d = Driver(cels, **kw)
     sp = spike_ios.IosSpike(d, BASELINE, speed=0.25)
-    sp._depth_ok = 12
     return sp, d
+
+
+class ProfundidadeQueMuda(unittest.TestCase):
+    """O bug relatado no iPhone: 1o contato selecionado, os seguintes 'NAO
+    encontrado' com a celula visivel. A faixa de selecionados empurra a lista
+    um nivel para baixo e a profundidade guardada deixa de enxergar."""
+
+    def test_reescala_quando_a_lista_fica_mais_funda(self):
+        cels = [Cel("Ana", "(21) 99999-0001")]
+        sp, d = spike(cels, profundidade_necessaria=14)
+        self.assertEqual(len(sp._find_cells_escalating()), 1)   # 1o contato: acha em 14
+        self.assertEqual(sp._depth_ok, 14)
+        d.profundidade_necessaria = 16                          # faixa apareceu: ficou mais fundo
+        d.chamadas.clear()
+        achadas = sp._find_cells_escalating()                   # 2o contato
+        self.assertEqual(len(achadas), 1, "perdeu a celula visivel na tela")
+        self.assertEqual(sp._depth_ok, 16)
+        self.assertEqual(sp._exact_matches(achadas, "+5521999990001", None), [cels[0]])
+
+    def test_nao_encontrado_de_verdade_continua_vazio(self):
+        sp, d = spike([], profundidade_necessaria=14)
+        self.assertEqual(sp._find_cells_escalating(), [])
+        self.assertEqual(sp._depth_ok, 18)                      # proxima busca ja comeca funda
+        self.assertEqual(sp._find_cells_escalating(), [])
+
+    def test_sem_a_chave_tambem_reescala(self):
+        os.environ.pop("LL_RAPIDO", None)
+        try:
+            cels = [Cel("Ana", "(21) 99999-0001")]
+            sp, d = spike(cels, profundidade_necessaria=14)
+            self.assertEqual(len(sp._find_cells_escalating()), 1)
+            d.profundidade_necessaria = 16
+            self.assertEqual(len(sp._find_cells_escalating()), 1)
+            self.assertEqual(sp._depth_ok, 16)
+        finally:
+            os.environ["LL_RAPIDO"] = "1"
 
 
 class CaminhoRapido(unittest.TestCase):
@@ -99,12 +144,13 @@ class CaminhoRapido(unittest.TestCase):
     def test_uma_chamada_para_os_telefones_e_match_exato(self):
         cels = [Cel("Ana", "(21) 99999-0001"), Cel("Bia", "(21) 99999-0002")]
         sp, d = spike(cels)
-        achadas = sp._find_cells_escalating()
+        sp._find_cells_escalating()            # 1a busca: descobre a profundidade
+        achadas = sp._find_cells_escalating()  # 2a: resposta crua com rotulos
         self.assertEqual(sp._rotulos_celulas, [c.label for c in cels])
         d.chamadas.clear()
         out = sp._exact_matches(achadas, "+5521999990002", None)
         self.assertEqual(out, [cels[1]])
-        self.assertEqual(d.chamadas, [("raw", PHONE_ID)])   # 1 chamada, nao 3 por celula
+        self.assertEqual([c[:2] for c in d.chamadas], [("raw", PHONE_ID)])  # 1 chamada
 
     def test_convite_barrado_pelo_rotulo(self):
         cels = [Cel("Convidar para o WhatsApp", "(21) 99999-0003", recado="")]
@@ -121,7 +167,8 @@ class CaminhoRapido(unittest.TestCase):
     def test_driver_sem_atributos_cai_no_caminho_antigo(self):
         cels = [Cel("Ana", "(21) 99999-0001")]
         sp, d = spike(cels, atributos=False)
-        achadas = sp._find_cells_escalating()
+        sp._find_cells_escalating()
+        achadas = sp._find_cells_escalating()   # tenta a resposta crua: sem rotulos
         self.assertIsNone(sp._rotulos_celulas)
         self.assertFalse(sp._attrs_ok)
         self.assertEqual(sp._exact_matches(achadas, "+5521999990001", None), [cels[0]])
@@ -129,6 +176,7 @@ class CaminhoRapido(unittest.TestCase):
     def test_contagem_diferente_nao_arrisca_alinhamento(self):
         cels = [Cel("Ana", "(21) 99999-0001"), Cel("Bia", "(21) 99999-0002")]
         sp, d = spike(cels, fones_a_menos=1)
+        sp._find_cells_escalating()
         achadas = sp._find_cells_escalating()
         self.assertEqual(sp._exact_matches(achadas, "+5521999990002", None), [cels[1]])
 

@@ -463,10 +463,14 @@ class IosSpike:
         # Caminho rapido: a profundidade que funcionou continua valendo dentro
         # do mesmo picker. Uma consulta, sem mexer nas settings.
         if self._depth_ok is not None:
-            # A profundidade em que as celulas apareceram neste picker nao muda:
-            # lista vazia aqui e "nao encontrado" de verdade. Antes, cada
-            # "nao encontrado" subia 14->16->18 (ate 8 chamadas) para nada.
-            return self._find_cells_com_rotulos()
+            cells = self._find_cells_com_rotulos()
+            if cells:
+                return cells
+            # Vazio na profundidade conhecida NAO e "nao encontrado" ainda: apos o
+            # 1o contato marcado, o WhatsApp acrescenta a faixa de selecionados e a
+            # lista fica um nivel mais fundo — a profundidade valida muda. (Foi
+            # exatamente isso que fez os contatos 2+ sairem como "nao encontrado"
+            # com a celula visivel na tela.) Re-escala antes de concluir.
         for depth in (12, 14, 16, 18):
             if depth == self._depth_ok:
                 continue   # ja consultada acima
@@ -477,10 +481,15 @@ class IosSpike:
             cells = self.find_all("contact_cell")
             if cells:
                 # Mantem a profundidade (so buscas pontuais; sem varredura).
+                if self._depth_ok != depth:
+                    log.info("celulas do seletor agora na profundidade %d", depth)
                 self._depth_ok = depth
+                self._rotulos_celulas = None
                 return cells
-        self._depth_ok = None
-        self._restore_depth()
+        # Nao encontrado de verdade: guarda a maior profundidade tentada para a
+        # proxima busca comecar por ela (a lista nao volta a ficar mais rasa).
+        self._depth_ok = 18
+        self._rotulos_celulas = None
         return []
 
     def _find_raw(self, accessibility_id: str):
