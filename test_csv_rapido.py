@@ -49,11 +49,19 @@ class FoneEl:
         return self.fone if a == "label" else None
 
 
+CLASS_CHAIN_CELL = "**/XCUIElementTypeCell"
+
+
 class Driver:
-    def __init__(self, cels, atributos=True, fones_a_menos=0, profundidade_necessaria=14):
+    def __init__(self, cels, atributos=True, fones_a_menos=0, profundidade_necessaria=14,
+                 id_acessivel=True):
         self.cels = cels
         self.atributos = atributos
         self.fones_a_menos = fones_a_menos
+        # No iPhone da Isabella (iOS 26.6) as celulas NAO respondem ao id
+        # PickerView_ContactCell; so aparecem pela class chain. id_acessivel=False
+        # reproduz isso (e o id do telefone tambem some).
+        self.id_acessivel = id_acessivel
         self.chamadas = []
         self.session_id = "sessao-falsa"
         self.command_executor = self      # como o cliente real: executor com execute()
@@ -68,9 +76,12 @@ class Driver:
     def create_web_element(self, eid):
         return self.cels[int(eid.split("-")[1])]
 
+    def _e_celula(self, val):
+        return (val == CELL_ID and self.id_acessivel) or val == CLASS_CHAIN_CELL
+
     def find_elements(self, by, val):
         self.chamadas.append(("find", val, self.profundidade))
-        return list(self.cels) if val == CELL_ID and self._enxerga() else []
+        return list(self.cels) if self._e_celula(val) and self._enxerga() else []
 
     def execute(self, cmd, params):
         self.chamadas.append(("raw", params["value"], self.profundidade))
@@ -78,7 +89,11 @@ class Driver:
             raise Exception("nao suportado")
         if not self._enxerga():
             return {"value": []}
-        if params["value"] == CELL_ID:
+        if params["value"] == PHONE_ID and not self.id_acessivel:
+            return {"value": []}
+        if not self._e_celula(params["value"]) and params["value"] != PHONE_ID:
+            return {"value": []}
+        if self._e_celula(params["value"]):
             itens = []
             for i, c in enumerate(self.cels):
                 item = {"ELEMENT": f"c-{i}"}
@@ -101,6 +116,28 @@ def spike(cels, **kw):
     d = Driver(cels, **kw)
     sp = spike_ios.IosSpike(d, BASELINE, speed=0.25)
     return sp, d
+
+
+class CelulasSoPelaClassChain(unittest.TestCase):
+    """O caso real do iPhone: o id PickerView_ContactCell nao existe; a celula
+    so aparece pela 2a camada do seletor. A busca crua tem que percorrer as
+    camadas como o find_all — e nunca tratar vazio como definitivo."""
+
+    def test_acha_pela_segunda_camada_e_seleciona(self):
+        cels = [Cel("Ana", "(21) 99999-0001")]
+        sp, d = spike(cels, id_acessivel=False)
+        self.assertEqual(len(sp._find_cells_escalating()), 1)       # 1o contato
+        achadas = sp._find_cells_escalating()                        # 2o contato (bug antigo)
+        self.assertEqual(len(achadas), 1, "vazio no id foi tratado como definitivo")
+        self.assertEqual(sp._exact_matches(achadas, "+5521999990001", None), [cels[0]])
+
+    def test_camada_usada_e_a_class_chain(self):
+        cels = [Cel("Ana", "(21) 99999-0001")]
+        sp, d = spike(cels, id_acessivel=False)
+        sp._find_cells_escalating(); d.chamadas.clear()
+        sp._find_cells_escalating()
+        valores = [c[1] for c in d.chamadas if c[0] == "raw"]
+        self.assertIn(CLASS_CHAIN_CELL, valores)
 
 
 class ProfundidadeQueMuda(unittest.TestCase):

@@ -492,73 +492,90 @@ class IosSpike:
         self._rotulos_celulas = None
         return []
 
-    def _find_raw(self, accessibility_id: str):
-        """Busca pontual crua: devolve [(elemento, label)] lendo o rotulo da
-        propria resposta (elementResponseAttributes), ou None se o driver nao
-        devolveu os atributos / nao aceitou a chamada."""
-        if self._attrs_ok is False or not self.attrs_na_resposta:
+    def _find_raw(self, sel, com_rect: bool = False):
+        """Busca pontual CRUA, percorrendo as camadas do seletor na mesma ordem
+        de find_all (accessibility id -> class chain -> predicados) e lendo os
+        atributos da propria resposta (elementResponseAttributes).
+
+        Devolve [{"el", "label", "rect"}] da PRIMEIRA camada com resultado, ou
+        None quando: a chave esta desligada, o driver nao devolveu os atributos,
+        ou NENHUMA camada achou nada — vazio nunca e resposta definitiva aqui,
+        quem decide "nao encontrado" e o caminho antigo (find_all).
+
+        Licao do iPhone da Isabella (iOS 26.6): as celulas do seletor NAO tem o
+        id PickerView_ContactCell; so aparecem pela class chain. Uma busca crua
+        que so olhava o id devolvia [] e os contatos 2+ saiam "nao encontrado"."""
+        if self._attrs_ok is False or not self.attrs_na_resposta or sel is None:
             return None
-        try:
-            # Resposta CRUA: driver.execute() converte os itens em WebElement e
-            # descarta os atributos; o executor de comandos devolve o JSON puro.
-            executor = getattr(self.d, "command_executor", None)
-            params = {"using": "accessibility id", "value": accessibility_id}
-            if executor is not None and hasattr(executor, "execute"):
-                resp = executor.execute("findElements",
-                                        {"sessionId": self.d.session_id, **params})
-            else:
-                resp = self.d.execute("findElements", params)
-        except Exception:                    # driver falso nos testes, WDA antigo...
-            self._attrs_ok = False
-            return None
-        if not isinstance(resp, dict) or resp.get("status") not in (None, 0):
-            self._attrs_ok = False
-            return None
-        itens = resp.get("value") or []
-        if isinstance(itens, dict):          # erro W3C vem como {"error": ...}
-            self._attrs_ok = False
-            return None
-        out = []
-        for it in itens:
-            if not isinstance(it, dict) or ("label" not in it and "name" not in it
-                                            and "value" not in it):
+        executor = getattr(self.d, "command_executor", None)
+        usa_executor = executor is not None and hasattr(executor, "execute")
+        for by, val in self._locators(sel):
+            params = {"using": by, "value": val}
+            try:
+                if usa_executor:
+                    resp = executor.execute("findElements",
+                                            {"sessionId": self.d.session_id, **params})
+                else:
+                    resp = self.d.execute("findElements", params)
+            except Exception:                # driver falso nos testes, WDA antigo...
                 self._attrs_ok = False
                 return None
-            eid = it.get("element-6066-11e4-a52e-4f735466cecf") or it.get("ELEMENT")
-            if not eid:
+            if not isinstance(resp, dict) or resp.get("status") not in (None, 0):
                 self._attrs_ok = False
                 return None
-            rotulo = (it.get("label") or it.get("name") or it.get("value") or "").strip()
-            out.append((self.d.create_web_element(eid), rotulo))
-        self._attrs_ok = True
-        return out
+            itens = resp.get("value") or []
+            if isinstance(itens, dict):      # erro W3C vem como {"error": ...}
+                continue                     # camada invalida neste driver: proxima
+            if not itens:
+                continue                     # nada nesta camada: tenta a proxima
+            out = []
+            for it in itens:
+                if not isinstance(it, dict) or ("label" not in it and "name" not in it
+                                                and "value" not in it):
+                    self._attrs_ok = False
+                    return None
+                if com_rect and not isinstance(it.get("rect"), dict):
+                    self._attrs_ok = False
+                    return None
+                eid = it.get("element-6066-11e4-a52e-4f735466cecf") or it.get("ELEMENT")
+                if not eid:
+                    self._attrs_ok = False
+                    return None
+                r = it.get("rect") or {}
+                out.append({
+                    "el": self.d.create_web_element(eid),
+                    "label": (it.get("label") or it.get("name") or it.get("value") or "").strip(),
+                    "rect": (float(r.get("x", 0)), float(r.get("y", 0)),
+                             float(r.get("width", 0)), float(r.get("height", 0)))
+                    if r else None,
+                })
+            self._attrs_ok = True
+            return out
+        return None
 
     def _find_cells_com_rotulos(self) -> list:
-        """Celulas do picker; quando o driver devolve os rotulos na resposta,
-        guarda-os alinhados em self._rotulos_celulas (0 chamadas extras)."""
-        sel = self.p.selectors.get("contact_cell")
-        cru = self._find_raw(sel.accessibility_id) if sel and sel.accessibility_id else None
-        if cru is None:
+        """Celulas do picker; quando a resposta crua traz os rotulos, guarda-os
+        alinhados em self._rotulos_celulas (0 chamadas extras). Vazio na busca
+        crua => find_all decide (percorre as mesmas camadas)."""
+        cru = self._find_raw(self.p.selectors.get("contact_cell"))
+        if not cru:
             self._rotulos_celulas = None
             return self.find_all("contact_cell")
-        self._rotulos_celulas = [r for _, r in cru]
-        return [el for el, _ in cru]
+        self._rotulos_celulas = [c["label"] for c in cru]
+        return [c["el"] for c in cru]
 
     def _textos_em_lote(self, cells) -> tuple[list, list] | None:
         """(telefones, rotulos) alinhados com `cells`, em UMA chamada para os
         telefones (os rotulos ja vieram com as celulas). None => usar o caminho
         celula a celula. Exige contagem igual: cada celula tem seu StaticText de
-        telefone/recado (confirmado no iPhone); se nao bater, nao arrisca."""
+        telefone/recado; se nao bater, nao arrisca."""
         rotulos = self._rotulos_celulas
         if not rotulos or len(rotulos) != len(cells):
             return None
-        sel = self.p.selectors.get("contact_phone")
-        if not sel or not sel.accessibility_id:
+        cru = self._find_raw(self.p.selectors.get("contact_phone"))
+        if not cru or len(cru) != len(cells):
             return None
-        cru = self._find_raw(sel.accessibility_id)
-        if cru is None or len(cru) != len(cells):
-            return None
-        return [r for _, r in cru], list(rotulos)
+        return [c["label"] for c in cru], list(rotulos)
 
     def _restore_depth(self) -> None:
         try:

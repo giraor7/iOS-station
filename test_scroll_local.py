@@ -131,8 +131,12 @@ class FakeDriver:
     def update_settings(self, s):
         pass
 
+    def _e_celula(self, val):
+        so_cc = getattr(self.m, "so_class_chain", False)
+        return (val == "PickerView_ContactCell" and not so_cc) or val == "**/XCUIElementTypeCell"
+
     def find_elements(self, by, val):
-        if val == "PickerView_ContactCell":
+        if self._e_celula(val):
             # seletor fechado (dialogo/conversa por cima) = nenhuma celula na tela
             return self.m.visiveis() if self.m.picker_aberto else []
         if val == "ParticipantPickerNavigationBar_RightBarButton":
@@ -153,15 +157,17 @@ class FakeDriver:
         """Rajada W3C (--turbo) e busca com atributos na resposta
         (elementResponseAttributes), como o WDA real."""
         if comando == "findElements":
+            achadas = self.find_elements(None, params["value"])
             if not getattr(self.m, "attrs_na_resposta", True):
                 # driver que ignora a setting: devolve so os ids
-                return {"value": [{"ELEMENT": f"cell-{c.i}"} for c in self.find_elements(None, params["value"])]}
-            self.m.buscas_com_atributos = getattr(self.m, "buscas_com_atributos", 0) + 1
+                return {"value": [{"ELEMENT": f"cell-{c.i}"} for c in achadas]}
+            if achadas:
+                self.m.buscas_com_atributos = getattr(self.m, "buscas_com_atributos", 0) + 1
             return {"value": [
                 {"ELEMENT": f"cell-{c.i}", "element-6066-11e4-a52e-4f735466cecf": f"cell-{c.i}",
                  "label": c.get_attribute("label"), "name": c.get_attribute("label"),
                  "rect": c.rect}
-                for c in self.find_elements(None, params["value"])]}
+                for c in achadas]}
         if comando != "actions" or not self.m.aceita_w3c:
             raise WebDriverException("unknown command: " + str(comando))
         self.m.rajadas += 1
@@ -458,6 +464,16 @@ class LeituraEmUmaRequisicao(unittest.TestCase):
         self.assertEqual(sorted(m.selecionados), list(range(256)))
         self.assertFalse(sp._attrs_na_resposta)
         self.assertEqual(sp.stats.get("telas_1_requisicao", 0), 0)
+
+    def test_celulas_so_pela_class_chain_como_no_iphone(self):
+        """iOS 26.6: o id PickerView_ContactCell nao existe; a leitura rapida
+        precisa cair na 2a camada e nunca tratar a 1a vazia como 'fim'."""
+        nomes = nomes_ordenados(400)
+        m, sp = novo(nomes)
+        m.so_class_chain = True
+        self.assertEqual(sp.selecionar(rs.Progresso(self.path)), 256)
+        self.assertEqual(sorted(m.selecionados), list(range(256)))
+        self.assertGreater(sp.stats.get("telas_1_requisicao", 0), 20)
 
     def test_turbo_com_leitura_rapida_e_cabecalhos(self):
         nomes = nomes_ordenados(400)

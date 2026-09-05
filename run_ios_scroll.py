@@ -308,52 +308,31 @@ class ScrollLivre(IosSpike):
 
     def _ligar_atributos_na_resposta(self) -> None:
         """Pede ao WDA para incluir name, label e rect na resposta do find.
-        Busca continua pontual (por id); so o formato da resposta muda."""
+        Busca continua pontual (por id/camada); so o formato da resposta muda."""
         if self._attrs_na_resposta is not None:
             return
         try:
             self.d.update_settings({"elementResponseAttributes": "name,label,rect",
                                     "shouldUseCompactResponses": False})
             self._attrs_na_resposta = True
+            self.attrs_na_resposta = True      # habilita _find_raw (herdado)
         except WebDriverException:
             self._attrs_na_resposta = False
 
     def _celulas_em_uma_requisicao(self) -> list | None:
-        """Devolve [(elemento, (x, y, w, h), rotulo)] com UMA chamada, ou None
-        quando o driver nao devolveu os atributos (ai o chamador le como antes)."""
+        """[(elemento, (x, y, w, h), rotulo)] com UMA chamada por camada do
+        seletor, ou None quando nada veio com atributos — ai o chamador le
+        como antes (find_all + rect por celula). Vazio NUNCA e definitivo."""
         if not self._attrs_na_resposta:
             return None
-        sel = self.p.selectors.get("contact_cell")
-        if not sel or not sel.accessibility_id:
-            return None
-        try:
-            resp = self.d.execute("findElements", {"using": "accessibility id",
-                                                   "value": sel.accessibility_id})
-        except WebDriverException:
-            return None
-        itens = (resp or {}).get("value") or []
-        out = []
-        for it in itens:
-            if not isinstance(it, dict) or not isinstance(it.get("rect"), dict) \
-                    or ("label" not in it and "name" not in it):
+        cru = self._find_raw(self.p.selectors.get("contact_cell"), com_rect=True)
+        if not cru:
+            if self._attrs_ok is False:
                 log.info("driver nao devolveu atributos na busca; lendo celula a celula")
                 self._attrs_na_resposta = False
-                return None
-            eid = it.get("element-6066-11e4-a52e-4f735466cecf") or it.get("ELEMENT")
-            if not eid:
-                self._attrs_na_resposta = False
-                return None
-            r = it["rect"]
-            try:
-                rect = (float(r.get("x", 0)), float(r.get("y", 0)),
-                        float(r.get("width", 0)), float(r.get("height", 0)))
-            except (TypeError, ValueError):
-                self._attrs_na_resposta = False
-                return None
-            out.append((self.d.create_web_element(eid), rect,
-                        (it.get("label") or it.get("name") or "").strip()))
+            return None
         self.stats["telas_1_requisicao"] = self.stats.get("telas_1_requisicao", 0) + 1
-        return out
+        return [(c["el"], c["rect"], c["label"]) for c in cru]
 
     def _ler_celulas(self, margem: float = MARGEM_INFERIOR) -> list:
         """Celulas visiveis, de cima para baixo.
