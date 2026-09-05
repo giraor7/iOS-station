@@ -117,8 +117,15 @@ class IosSpike:
         # LL_RAPIDO=1 liga o modo experimental (checagens a cada 8 contatos,
         # rotulos na resposta da busca). Desligado: checa a CADA contato e le
         # celula a celula — o comportamento que criou listas no iPhone.
+        # Chaves separadas para isolar a causa no aparelho:
+        #   LL_RAPIDO=1     liga tudo abaixo de uma vez
+        #   LL_CHECAGEM=8   checagens de seguranca a cada 8 contatos (padrao: cada 1)
+        #   LL_ATTRS=1      rotulos na resposta da busca (conferencia em 1 chamada)
+        #   LL_DIGITACAO=N  caracteres por segundo ao digitar (padrao do WDA: 60)
         self.rapido = os.environ.get("LL_RAPIDO") == "1"
-        self._CHECAR_INTERVALO = 8 if self.rapido else 1
+        self.checagem_periodica = self.rapido or os.environ.get("LL_CHECAGEM") == "8"
+        self.attrs_na_resposta = self.rapido or os.environ.get("LL_ATTRS") == "1"
+        self._CHECAR_INTERVALO = 8 if self.checagem_periodica else 1
         self._contatos_desde_check = self._CHECAR_INTERVALO
         # Textos das celulas vindos na propria resposta da busca
         # (elementResponseAttributes). None = ainda nao se sabe se o driver honra.
@@ -401,6 +408,9 @@ class IosSpike:
         self.settle()
 
         cells = self._find_cells_escalating()
+        # Diagnostico barato e decisivo: 0 celulas = a busca nao filtrou (texto
+        # digitado errado/incompleto?); 2+ = ha celulas a mais na tela (chips?).
+        log.info("busca: %d celula(s) na tela", len(cells))
         if not cells:
             if self.in_picker():
                 return None  # simplesmente nao ha resultado
@@ -477,7 +487,7 @@ class IosSpike:
         """Busca pontual crua: devolve [(elemento, label)] lendo o rotulo da
         propria resposta (elementResponseAttributes), ou None se o driver nao
         devolveu os atributos / nao aceitou a chamada."""
-        if self._attrs_ok is False or not self.rapido:
+        if self._attrs_ok is False or not self.attrs_na_resposta:
             return None
         try:
             # Resposta CRUA: driver.execute() converte os itens em WebElement e
@@ -810,6 +820,22 @@ class Ambiguous(Exception):
 
 # ---------------- driver ----------------
 
+def _ajustes_experimentais() -> dict:
+    """Settings de sessao opcionais, cada um com sua chave de ambiente, para
+    isolar no aparelho o que ajuda e o que atrapalha (ver IosSpike.__init__)."""
+    tudo = os.environ.get("LL_RAPIDO") == "1"
+    ajustes: dict = {}
+    digitacao = os.environ.get("LL_DIGITACAO", "200" if tudo else "")
+    if digitacao.isdigit() and int(digitacao) > 0:
+        ajustes["typingFrequency"] = int(digitacao)
+    if tudo or os.environ.get("LL_ATTRS") == "1":
+        ajustes["elementResponseAttributes"] = "name,label,value,rect"
+        ajustes["shouldUseCompactResponses"] = False
+    if ajustes:
+        log.info("ajustes experimentais de sessao: %s", ajustes)
+    return ajustes
+
+
 def build_driver(server: str, wda_bundle: str | None, *,
                  wda_timeout: int = 240):
     """Sessao XCUITest com capabilities de estabilidade e velocidade.
@@ -867,10 +893,7 @@ def build_driver(server: str, wda_bundle: str | None, *,
             # EXPERIMENTAL (LL_RAPIDO=1): digitacao a 200 chars/s e rotulos na
             # propria resposta das buscas. Desligado por padrao: uma rodada com
             # isto ligado deixou contatos sem selecionar no iPhone (em apuracao).
-            **({"typingFrequency": 200,
-                "elementResponseAttributes": "name,label,value,rect",
-                "shouldUseCompactResponses": False}
-               if os.environ.get("LL_RAPIDO") == "1" else {}),
+            **_ajustes_experimentais(),
             "useJSONSource": True,
             "pageSourceExcludedAttributes": "visible,accessible,frame,index",
         })

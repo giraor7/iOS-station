@@ -176,8 +176,12 @@ De onde saiu o ganho, sem afrouxar trava nenhuma:
   variável `LL_RAPIDO=1` no ambiente: digitação a 200 caracteres/s, checagens
   de segurança a cada 8 contatos e conferência do número em 1 chamada. Uma
   rodada com isso ligado deixou contatos sem selecionar no iPhone; até apurar
-  a causa, o padrão é o comportamento anterior, que criou listas. Para testar:
-  `LL_RAPIDO=1 python3 gui_ios.py` (ou antes do `run_ios.py`).
+  a causa, o padrão é o comportamento anterior, que criou listas. Chaves
+  separadas para isolar: `LL_DIGITACAO=200` (só a digitação rápida),
+  `LL_ATTRS=1` (só os rótulos na resposta), `LL_CHECAGEM=8` (só as checagens
+  a cada 8), `LL_RAPIDO=1` (tudo). Exemplo: `LL_DIGITACAO=200 python3 gui_ios.py`.
+  O log agora imprime `busca: N celula(s) na tela` a cada contato: 0 = a
+  busca não filtrou (texto digitado incompleto); 2+ = há células a mais.
 - **Modo arquivo (2ª rodada)**: o campo de busca é reaproveitado entre contatos (1 busca a menos); um "não encontrado" não sobe mais a profundidade 14→16→18 (até 8 chamadas) — a profundidade do seletor não muda dentro da lista; a linha "Convidar" é barrada ANTES do clique lendo o rótulo, o que permitiu encurtar a pausa depois do clique (de 1,5×ritmo para 0,5×ritmo). Preset **Máximo** em Configurações leva as pausas ao piso do runner (0,375 s após digitar): use só depois de medir.
 - **Modo arquivo (1ª rodada)**: a trava do compositor de mensagem fazia até 8 consultas
   por contato (uma por rótulo); agora é 1 consulta com o mesmo critério. A
