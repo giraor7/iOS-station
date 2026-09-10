@@ -37,6 +37,11 @@ def main() -> int:
     ap.add_argument("--with-tap", action="store_true",
                     help="marca e desmarca cada contato (mede o ciclo completo)")
     ap.add_argument("--trust-profile", action="store_true")
+    ap.add_argument("--speed", type=float, default=0.4,
+                    help="MESMO ritmo do runner (Turbo=0.4, Seguro=1.0). Sem isto a "
+                         "medida nao e comparavel com a operacao real")
+    ap.add_argument("--pace", type=float, default=0.1,
+                    help="pausa entre contatos, igual a do runner")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -60,7 +65,11 @@ def main() -> int:
             profile = BASELINE
             log.warning("perfil baseline NAO validado (--trust-profile)")
 
-        spike = IosSpike(driver, profile)
+        spike = IosSpike(driver, profile, speed=args.speed)
+        if args.trust_profile:
+            spike.verify_selection = False      # igual ao runner
+        log.info("medindo com speed=%.2f e pace=%.2fs (o mesmo do runner)",
+                 args.speed, args.pace)
         t0 = time.monotonic()
         spike.transition(State.PREPARING)
         spike.open_new_broadcast()
@@ -79,13 +88,18 @@ def main() -> int:
                 continue
             if args.with_tap:
                 cell.click()
-                spike.settle()
-                # desmarca para nao deixar estado: toca de novo na mesma celula
+                spike.settle(0.5)          # a mesma pausa do runner apos o toque
+            if args.pace:
+                time.sleep(args.pace)
+            # O RELOGIO PARA AQUI: o que vem abaixo (desmarcar) so existe no
+            # bench, para nao deixar contatos marcados no aparelho. Contar isso
+            # dobrava o tempo por contato e inflava qualquer comparacao.
+            dt = time.monotonic() - t
+            if args.with_tap:
                 again = spike.find_exact_cell(nc.e164, nc.name or None)
                 if again is not None:
                     again.click()
-                    spike.settle()
-            dt = time.monotonic() - t
+                    spike.settle(0.5)
             times.append(dt)
             found += 1
             if i % 5 == 0:
@@ -101,10 +115,12 @@ def main() -> int:
         print(f"tempo por contato: media {avg:.2f}s  min {min(times):.2f}s  max {max(times):.2f}s")
         print(f"abrir o fluxo: {t_open:.1f}s (uma vez por lista)")
         print("\n--- extrapolacao (lista cheia de 256) ---")
-        for pace in (0.0, 0.5, 1.0):
-            per_list = t_open + 256 * (avg + pace) + 5
-            print(f"pace {pace:.1f}s/contato -> {per_list/60:.1f} min/lista | "
-                  f"40 listas (10 mil): {40*per_list/3600:.1f} h/aparelho")
+        ordenados = sorted(times)
+        mediana = ordenados[len(ordenados) // 2]
+        print(f"mediana: {mediana:.2f}s/contato (use esta para comparar rodadas)")
+        per_list = t_open + 256 * mediana + 5
+        print(f"-> {per_list/60:.1f} min por lista de 256 | "
+              f"40 listas (10 mil): {40*per_list/3600:.1f} h/aparelho")
         print("frota em paralelo: o tempo total ~= o de UM aparelho.")
         if not args.with_tap:
             print("obs: modo somente-busca subestima; some ~0,3-0,5s/contato pelo toque.")

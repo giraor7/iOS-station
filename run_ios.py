@@ -62,6 +62,21 @@ def pace_sleep(seconds: float, seed: int) -> None:
     time.sleep(seconds * (0.75 + 0.5 * jitter))
 
 
+def resumo_de_tempos(tempos: list[float], total: float) -> str:
+    """Uma linha por lista: e com isto que se compara uma rodada com a outra.
+
+    Mediana em vez de media porque um unico contato lento (WDA reconectando)
+    distorce a media; p95 mostra a cauda. Nao guarda nada em arquivo."""
+    if not tempos:
+        return f"{total:.0f} s no total"
+    ordenados = sorted(tempos)
+    meio = ordenados[len(ordenados) // 2]
+    p95 = ordenados[min(len(ordenados) - 1, int(len(ordenados) * 0.95))]
+    por_min = 60.0 * len(tempos) / total if total > 0 else 0.0
+    return (f"{total / 60:.1f} min no total | {meio:.2f} s por contato (mediana) | "
+            f"p95 {p95:.2f} s | {por_min:.0f} contatos por minuto")
+
+
 num_hash = sessao.hash_numero   # uma unica definicao (progresso, relatorio, GUI)
 
 
@@ -250,9 +265,16 @@ def main() -> int:
             spike.open_new_broadcast()
 
 
+            # MEDICAO: o tempo de cada contato inclui a pausa do ritmo, que e
+            # o que o operador sente. E a unica medida fiel — o bench_ios roda
+            # em outro ritmo e faz duas buscas por contato.
+            tempos: list[float] = []
+            inicio_lista = time.monotonic()
             for j, nc in enumerate(lote):
+                t0 = time.monotonic()
                 spike.search_and_select(nc.e164, nc.name or None, label=f"c{j}")
                 pace_sleep(args.pace, j)
+                tempos.append(time.monotonic() - t0)
 
             spike.finish(args.approve_create)
             # So conta como criada depois do toque em "Criar" (nao o estado
@@ -275,6 +297,8 @@ def main() -> int:
             amb = sum(1 for r in resultados if r["outcome"] == "ambiguous")
             log.info("%s: %d selecionados, %d nao encontrados, %d ambiguos; criada=%s",
                      label, sel, nf, amb, concluida)
+            log.info("%s: %s", label, resumo_de_tempos(tempos,
+                                                       time.monotonic() - inicio_lista))
             if getattr(spike, "colisoes", 0):
                 # Quantas vezes a tela ainda mostrava o contato anterior. E a
                 # medicao que diz se a pausa apos digitar esta curta demais.

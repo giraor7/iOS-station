@@ -348,6 +348,23 @@ class ListasEmSequencia(unittest.TestCase):
         self.assertIn(("criar", 1), CHAMADAS)
 
 
+class MedicaoPorLista(unittest.TestCase):
+    """Uma linha por lista e o que permite comparar duas rodadas."""
+
+    def test_mediana_ignora_o_contato_lento(self):
+        t = run_ios.resumo_de_tempos([3.0, 3.1, 3.0, 12.0, 2.9], 24.0)
+        self.assertIn("3.00 s por contato (mediana)", t)
+        self.assertIn("12.00", t)            # a cauda continua visivel
+        self.assertIn("0.4 min no total", t)
+
+    def test_sem_contatos_nao_divide_por_zero(self):
+        self.assertEqual(run_ios.resumo_de_tempos([], 0.0), "0 s no total")
+
+    def test_contatos_por_minuto(self):
+        self.assertIn("30 contatos por minuto",
+                      run_ios.resumo_de_tempos([2.0] * 30, 60.0))
+
+
 class LimiteDeLote(unittest.TestCase):
 
     def test_padrao_e_256(self):
