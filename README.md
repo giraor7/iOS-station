@@ -52,6 +52,24 @@ componentes). A automação em si (`spike_ios.py`, `run_ios.py`,
 Testes da interface, sem iPhone: `python3 test_gui_state.py` e
 `python3 test_gui_runner.py`.
 
+## Nome das listas e listas em sequência
+
+Depois do "Criar", o WhatsApp abre a conversa da lista com o título padrão
+("Mensagens"). A estação toca no título, abre as informações e escreve
+**"Lista de transmissão 01"**, "02", … (a numeração segue a ordem das listas;
+`--sem-nome` desliga). Regras: só digita depois de comprovar que saiu da
+conversa (o campo de mensagem nunca é tocado); se algum elemento não aparecer,
+a lista fica com o nome padrão, o inventário da tela é salvo em
+`inventory-nomear.json` e a rodada continua.
+
+Os seletores dessa tela são palpites até serem confirmados no iPhone. Para
+confirmar de uma vez: com a conversa de uma lista aberta, rode
+`python3 probe_nomear.py` e envie os `inventory-nomear-*.json`.
+
+Em sequência: depois de criar (e nomear), a estação volta para Conversas antes
+de abrir a lista seguinte — nos dois modos. Sem isso a segunda lista não achava
+o "+", que não existe dentro de uma conversa.
+
 ## Comece por aqui
 
 ```bash

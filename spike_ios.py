@@ -137,6 +137,9 @@ class IosSpike:
         # (elementResponseAttributes). None = ainda nao se sabe se o driver honra.
         self._attrs_ok: bool | None = None
         self._rotulos_celulas: list | None = None
+        # Nome a dar a lista logo apos "Criar" (ex.: "Lista de transmissão 01").
+        # None = deixa o nome padrao do WhatsApp.
+        self.nome_lista: str | None = None
 
     # ---------------- infra ----------------
 
@@ -325,6 +328,13 @@ class IosSpike:
                 "tentativa %d: 'new_chat_button' nao visivel — "
                 "tentando fechar picker/modal aberto", attempt + 1
             )
+            # Dentro de uma conversa (a lista recem-criada, por exemplo) o "+"
+            # nao existe: primeiro tenta VOLTAR; so depois procura Cancelar.
+            voltar = self.wait_for("back_button", timeout=2, required=False)
+            if voltar is not None:
+                voltar.click()
+                self.settle(1.5)
+                continue
             # Procura Cancelar em qualquer profundidade antes de desistir
             for depth in (12, 16, 20):
                 try:
@@ -840,8 +850,104 @@ class IosSpike:
         btn.click()
         self.settle()
         # Nao confirmamos nada alem da criacao: nao tocamos em compositor/envio.
+        if self.nome_lista:
+            self.settle(1.5)   # a conversa da lista abre
+            self.nomear_lista(self.nome_lista)
         self.transition(State.COMPLETED)
         log.info("lista criada (nenhuma mensagem enviada).")
+
+    # ---------------- depois de criar: nome e volta ----------------
+
+    def _composer_visivel(self) -> bool:
+        """True se o campo de escrever mensagem esta na tela (= estamos numa
+        conversa). Usa a mesma trava do resto do fluxo, so que como pergunta."""
+        try:
+            self.assert_no_composer()
+        except UnsafeState:
+            return True
+        return False
+
+    def _nomear_falhou(self, motivo: str) -> bool:
+        log.warning("nao consegui nomear a lista (%s): ela foi criada com o nome "
+                    "padrao. Inventario da tela em inventory-nomear.json — envie para "
+                    "ajustarmos os seletores.", motivo)
+        _dump_inventory_on_fail(self.d, "inventory-nomear.json")
+        return False
+
+    def nomear_lista(self, nome: str) -> bool:
+        """Logo apos "Criar", o WhatsApp abre a conversa da lista com o titulo
+        padrao ("Mensagens"). Toca no titulo (abre as informacoes da lista),
+        escreve o nome e salva.
+
+        Regras: NUNCA digita enquanto o compositor de mensagem estiver na tela
+        (so se digita depois de comprovar que saimos da conversa); qualquer
+        elemento que nao apareca => desiste, registra o inventario e segue —
+        a lista continua criada, so sem o nome. Nomear nunca aborta a rodada."""
+        log.info("nomeando a lista: %s", mask(nome))
+        titulo = self.wait_for("chat_title_button", timeout=6, required=False)
+        if titulo is None:
+            return self._nomear_falhou("titulo da conversa nao encontrado")
+        titulo.click()
+        self.settle(1.5)
+        if self._composer_visivel():
+            return self._nomear_falhou("o toque no titulo nao saiu da conversa")
+
+        campo = self.wait_for("list_name_field", timeout=4, required=False)
+        if campo is None:
+            linha = self.wait_for("list_name_row", timeout=4, required=False)
+            if linha is None:
+                return self._nomear_falhou("linha/campo do nome nao encontrado")
+            linha.click()
+            self.settle(1.0)
+            campo = self.wait_for("list_name_field", timeout=4, required=False)
+            if campo is None:
+                return self._nomear_falhou("campo do nome nao apareceu apos tocar na linha")
+        if self._composer_visivel():          # defesa em profundidade
+            return self._nomear_falhou("compositor visivel: nao digito")
+        try:
+            campo.clear()
+        except WebDriverException:
+            pass
+        setter = getattr(campo, "set_value", None)
+        try:
+            if setter is not None:
+                setter(nome)
+            else:
+                campo.send_keys(nome)
+        except (WebDriverException, AttributeError):
+            try:
+                campo.send_keys(nome)
+            except WebDriverException:
+                return self._nomear_falhou("nao consegui digitar o nome")
+        salvar = self.wait_for("save_button", timeout=4, required=False)
+        if salvar is not None:
+            salvar.click()
+        else:
+            try:
+                campo.send_keys("\n")     # alguns campos salvam com Return
+            except WebDriverException:
+                pass
+        self.settle(1.0)
+        log.info("lista nomeada")
+        return True
+
+    def voltar_para_conversas(self) -> None:
+        """Da conversa da lista (ou das informacoes) de volta para a aba
+        Conversas — sem tocar no compositor. Precondicao da proxima lista."""
+        for _ in range(4):
+            if self.wait_for("chats_tab", timeout=2, required=False) is not None:
+                return
+            voltar = self.wait_for("back_button", timeout=2, required=False)
+            if voltar is not None:
+                voltar.click()
+            else:
+                try:
+                    self.d.back()
+                except WebDriverException:
+                    pass
+            self.settle(1.2)
+        raise UiChanged("nao consegui voltar para Conversas depois de criar a lista; "
+                        "volte no iPhone e rode de novo (o progresso ja foi salvo)")
 
 
 class Ambiguous(Exception):

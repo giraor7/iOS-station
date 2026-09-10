@@ -124,6 +124,39 @@ BASELINE = IosProfile(
             labels=("Criar", "Create"),
         ),
 
+        # --- nomear a lista (tela da conversa da lista, logo apos "Criar") ---
+        # A CONFIRMAR NO IPHONE (rode probe_nomear.py com a conversa da lista
+        # aberta). Sao palpites por rotulo; se algum nao casar, a lista fica com
+        # o nome padrao e a rodada CONTINUA — nomear nunca aborta nem toca no
+        # compositor (o fluxo confere que saiu da conversa antes de digitar).
+        "chat_title_button": IosSelector(
+            class_chain=('**/XCUIElementTypeNavigationBar/**/XCUIElementTypeButton'
+                         '[`label CONTAINS[c] "Mensagens" OR label CONTAINS[c] "Messages" '
+                         'OR label CONTAINS[c] "transmiss" OR label CONTAINS[c] "Broadcast"`]'),
+            predicate=('type == "XCUIElementTypeButton" AND (label CONTAINS[c] "Mensagens" '
+                       'OR label CONTAINS[c] "Messages" OR label CONTAINS[c] "transmiss" '
+                       'OR label CONTAINS[c] "Broadcast")'),
+        ),
+        # Linha/botao que abre a edicao do nome na tela de informacoes.
+        "list_name_row": IosSelector(
+            labels=("Nome da lista", "Editar nome", "Nome", "List name", "Edit name", "Name"),
+        ),
+        # Campo de texto do nome (na tela de informacoes ou na caixa de edicao).
+        "list_name_field": IosSelector(
+            class_chain="**/XCUIElementTypeTextField",
+            predicate='type == "XCUIElementTypeTextField"',
+        ),
+        "save_button": IosSelector(
+            element_type="XCUIElementTypeButton",
+            labels=("Salvar", "Save", "OK", "Concluído", "Done"),
+        ),
+        # Voltar (conversa -> Conversas; informacoes -> conversa).
+        "back_button": IosSelector(
+            element_type="XCUIElementTypeButton",
+            labels=("Voltar", "Back", "Conversas", "Chats"),
+            predicate='type == "XCUIElementTypeButton" AND (name == "back" OR name == "NavigationBar_BackButton")',
+        ),
+
         # --- trava de seguranca ----------------------------------------------
         # Se isto aparecer, estamos numa conversa: o spike ABORTA na hora.
         # Nunca escrevemos nem enviamos mensagem.

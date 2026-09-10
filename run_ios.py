@@ -114,6 +114,8 @@ def main() -> int:
     ap.add_argument("--pace-lists", type=float, default=30.0,
                     help="pausa media entre listas, em segundos")
     ap.add_argument("--trust-profile", action="store_true")
+    ap.add_argument("--sem-nome", action="store_true",
+                    help="nao dar nome as listas (padrao: 'Lista de transmissão NN')")
     ap.add_argument("--speed", type=float, default=1.0,
                     help="velocidade das pausas internas: 1.0=seguro, 0.6=rapido, 0.4=turbo (experimental)")
     # filtros de area (opcionais) — mesmos do Android
@@ -214,6 +216,8 @@ def main() -> int:
                 spike.search_and_select(nc.e164, nc.name or None, label=f"c{j}")
                 pace_sleep(args.pace, j)
 
+            if not args.sem_nome:
+                spike.nome_lista = f"Lista de transmissão {i:02d}"
             spike.finish(args.approve_create)
             concluida = args.approve_create and spike.state == State.COMPLETED
             resultados = [
@@ -221,6 +225,12 @@ def main() -> int:
                 for k, r in enumerate(spike.results) if k < len(lote)
             ]
             progress.mark(label, resultados, concluida)
+            if concluida:
+                # Depois de "Criar" o WhatsApp fica DENTRO da conversa da lista:
+                # sem voltar para Conversas, a proxima lista nao acha o "+".
+                # (So depois de gravar o progresso: se a volta falhar, a lista
+                # criada nao e refeita na retomada.)
+                spike.voltar_para_conversas()
 
             sel = sum(1 for r in resultados if r["outcome"] == "selected")
             nf = sum(1 for r in resultados if r["outcome"] == "not_found")
