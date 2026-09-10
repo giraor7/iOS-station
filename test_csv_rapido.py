@@ -222,14 +222,30 @@ class CaminhoRapido(unittest.TestCase):
         self.assertEqual(sp._contatos_desde_check, sp._CHECAR_INTERVALO)
         self.assertEqual(sp._CHECAR_INTERVALO, 8)
 
+    def test_checagem_a_cada_8_e_o_padrao_e_ll_checagem_1_volta_ao_antigo(self):
+        os.environ.pop("LL_RAPIDO", None)
+        os.environ.pop("LL_CHECAGEM", None)
+        try:
+            sp, _ = spike([])
+            self.assertEqual(sp._CHECAR_INTERVALO, 8)          # padrao novo
+            self.assertEqual(sp._contatos_desde_check, 8)      # 1o contato checa
+            os.environ["LL_CHECAGEM"] = "1"
+            sp, _ = spike([])
+            self.assertEqual(sp._CHECAR_INTERVALO, 1)          # comportamento antigo
+            os.environ["LL_CHECAGEM"] = "abc"
+            sp, _ = spike([])
+            self.assertEqual(sp._CHECAR_INTERVALO, 8)          # valor invalido => padrao
+        finally:
+            os.environ.pop("LL_CHECAGEM", None)
+            os.environ["LL_RAPIDO"] = "1"
+
     def test_sem_a_chave_o_comportamento_e_o_validado(self):
-        """LL_RAPIDO desligado: checa a cada contato e nao usa a resposta crua."""
+        """LL_RAPIDO desligado: nao usa a resposta crua (leitura celula a celula)."""
         os.environ.pop("LL_RAPIDO", None)
         try:
             cels = [Cel("Ana", "(21) 99999-0001")]
             sp, d = spike(cels)
             self.assertFalse(sp.rapido)
-            self.assertEqual(sp._CHECAR_INTERVALO, 1)
             achadas = sp._find_cells_escalating()
             self.assertIsNone(sp._rotulos_celulas)
             self.assertEqual([c for c in d.chamadas if c[0] == "raw"], [])

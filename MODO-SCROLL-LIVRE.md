@@ -172,14 +172,15 @@ automação de interface. O que existe é cortar chamadas desperdiçadas:
 
 De onde saiu o ganho, sem afrouxar trava nenhuma:
 
-- **Modo arquivo (3ª rodada, EXPERIMENTAL, desligada por padrão)**: só com a
-  variável `LL_RAPIDO=1` no ambiente: digitação a 200 caracteres/s, checagens
-  de segurança a cada 8 contatos e conferência do número em 1 chamada. Uma
-  rodada com isso ligado deixou contatos sem selecionar no iPhone; até apurar
-  a causa, o padrão é o comportamento anterior, que criou listas. Chaves
-  separadas para isolar: `LL_DIGITACAO=200` (só a digitação rápida),
-  `LL_ATTRS=1` (só os rótulos na resposta), `LL_CHECAGEM=8` (só as checagens
-  a cada 8), `LL_RAPIDO=1` (tudo). Exemplo: `LL_DIGITACAO=200 python3 gui_ios.py`.
+- **Modo arquivo (3ª rodada)**: **checagens de segurança a cada 8 contatos
+  viraram padrão** (medido no iPhone: a checagem "WhatsApp em primeiro plano"
+  custava 0,8 s por contato, o item mais caro do ciclo; a segurança não
+  depende dela — se o seletor sumir, a busca seguinte falha sozinha, e a linha
+  "Convidar" é barrada antes do toque). `LL_CHECAGEM=1` volta a checar a cada
+  contato. Ainda experimentais, desligadas por padrão: `LL_DIGITACAO=200`
+  (digitação rápida), `LL_ATTRS=1` (rótulos na resposta da busca; agora
+  percorre todas as camadas do seletor), `LL_RAPIDO=1` (as duas).
+  Exemplo: `LL_DIGITACAO=200 python3 gui_ios.py`.
   O log agora imprime `busca: N celula(s) na tela` a cada contato: 0 = a
   busca não filtrou (texto digitado incompleto); 2+ = há células a mais.
 - **Modo arquivo (2ª rodada)**: o campo de busca é reaproveitado entre contatos (1 busca a menos); um "não encontrado" não sobe mais a profundidade 14→16→18 (até 8 chamadas) — a profundidade do seletor não muda dentro da lista; a linha "Convidar" é barrada ANTES do clique lendo o rótulo, o que permitiu encurtar a pausa depois do clique (de 1,5×ritmo para 0,5×ritmo). Preset **Máximo** em Configurações leva as pausas ao piso do runner (0,375 s após digitar): use só depois de medir.

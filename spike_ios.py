@@ -123,9 +123,15 @@ class IosSpike:
         #   LL_ATTRS=1      rotulos na resposta da busca (conferencia em 1 chamada)
         #   LL_DIGITACAO=N  caracteres por segundo ao digitar (padrao do WDA: 60)
         self.rapido = os.environ.get("LL_RAPIDO") == "1"
-        self.checagem_periodica = self.rapido or os.environ.get("LL_CHECAGEM") == "8"
         self.attrs_na_resposta = self.rapido or os.environ.get("LL_ATTRS") == "1"
-        self._CHECAR_INTERVALO = 8 if self.checagem_periodica else 1
+        # PADRAO: a cada 8 contatos (medido no iPhone: activeAppInfo custa ~0,8 s
+        # por contato, o item mais caro do ciclo). A seguranca nao depende disto:
+        # se o seletor sumir, a busca do contato seguinte falha sozinha e a
+        # estacao para; e a celula "Convidar" e barrada pelo rotulo ANTES do
+        # toque. LL_CHECAGEM=1 volta a checar a cada contato.
+        intervalo = os.environ.get("LL_CHECAGEM", "8").strip()
+        self._CHECAR_INTERVALO = int(intervalo) if intervalo.isdigit() and int(intervalo) > 0 else 8
+        self.checagem_periodica = self._CHECAR_INTERVALO > 1
         self._contatos_desde_check = self._CHECAR_INTERVALO
         # Textos das celulas vindos na propria resposta da busca
         # (elementResponseAttributes). None = ainda nao se sabe se o driver honra.
