@@ -1,49 +1,57 @@
 COMO ABRIR A ESTAÇÃO iOS NO MAC (leia uma vez)
 ================================================
 
-Por que o Mac reclama
----------------------
-Tudo que chega pelo navegador recebe a marca "quarentena" do macOS. Ao abrir o
-iniciar_gui.command, o Finder diz que "não é possível verificar o desenvolvedor".
-Não é problema no arquivo: é o macOS avisando que veio da internet.
-
-Primeira abertura de cada versão baixada (só uma vez)
------------------------------------------------------
-1. Descompacte o zip. Vai aparecer a pasta ios-station.
-2. Clique com o BOTÃO DIREITO em iniciar_gui.command e escolha "Abrir".
-3. Na janela de aviso, clique em "Abrir" de novo.
-
-Pronto. O atalho remove a marca de quarentena da pasta inteira; daí em diante
-abre com dois cliques normais.
-
-Alternativa pelo Terminal (mesmo efeito):
-    xattr -dr com.apple.quarantine ~/Downloads/ios-station
-
-Ambiente Python (.venv)
+O dia a dia: atualizar
 -----------------------
-O zip não traz o .venv de propósito (é grande e é do seu Mac). Duas opções:
-  a) copie a pasta .venv da versão anterior para dentro da nova pasta; ou
-  b) deixe o iniciar_gui.command instalar o que faltar na primeira abertura
-     (precisa de internet e leva 1 a 2 minutos).
+Dois cliques em atualizar.command. Ele faz "git pull --ff-only", instala o que
+faltar e abre a estação; não mexe no .venv nem nos arquivos de progresso. Se ele
+disser que há alteração local ou que não há internet, NADA foi mudado — chame o
+suporte em vez de apagar a pasta.
 
-Progresso das listas
+Abrir sem atualizar
 --------------------
-O arquivo progress.scroll.local.json (Scroll Livre) e progress.ios.local.json
-(modo arquivo) também ficam fora do zip. Se quiser continuar de onde parou,
-copie-os da pasta anterior para a nova.
+Dois cliques em iniciar_gui.command.
 
-Para não baixar mais zip
-------------------------
+Instalação, uma vez só
+-----------------------
 A estação vive num repositório privado no GitHub. Uma vez só, no Terminal:
 
     cd ~/Trabalho/"Marcelo Queiroz"
     git clone https://github.com/giraor7/iOS-station.git ios-station
-    cp -R V-15.5-ios-station/.venv ios-station/      # reaproveita o ambiente
 
 (o GitHub vai pedir login: aceite o convite de colaborador que chegou por
 e-mail e entre com sua conta; se pedir senha, use um token do GitHub ou faça
 login pelo app GitHub Desktop antes).
 
+Se você já tinha uma pasta da estação, copie o .venv dela para dentro da nova:
+    cp -R <pasta-antiga>/.venv ios-station/
+Se não tiver, o iniciar_gui.command instala sozinho na primeira abertura
+(precisa de internet, 1 a 2 minutos).
+
 Daí em diante, cada atualização é só dois cliques em atualizar.command: ele
-puxa a versão nova, instala o que faltar e abre a estação. Sem download, sem
-quarentena, sem copiar nada.
+puxa a versão nova, instala o que faltar e abre a estação. Sem download de zip,
+sem quarentena, sem copiar nada.
+
+Se o Mac reclamar do desenvolvedor
+------------------------------------
+Isso vale para a primeira abertura de uma pasta baixada por fora do git (por
+exemplo, se alguém te mandar a pasta por fora do fluxo acima). Tudo que chega
+pelo navegador ou por AirDrop recebe a marca "quarentena" do macOS: o Finder diz
+que "não é possível verificar o desenvolvedor" ao abrir iniciar_gui.command.
+Não é problema no arquivo — é o macOS avisando que veio de fora.
+
+1. Clique com o BOTÃO DIREITO em iniciar_gui.command e escolha "Abrir".
+2. Na janela de aviso, clique em "Abrir" de novo.
+
+Isso remove a marca de quarentena da pasta inteira; daí em diante abre com dois
+cliques normais.
+
+Alternativa pelo Terminal (mesmo efeito):
+    xattr -dr com.apple.quarantine ~/Downloads/ios-station
+
+Arquivos que ficam de fora
+----------------------------
+Os arquivos progress.scroll.local.json / progress.ios.local.json e qualquer
+arquivo de contatos (.csv, .vcf) não vêm no repositório de propósito: eles são
+dados pessoais e ficam só neste Mac. Se trocar de pasta, copie-os à mão — ver
+COMO-OPERAR.md §8.

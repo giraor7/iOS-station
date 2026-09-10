@@ -14,7 +14,7 @@ import queue
 import subprocess
 import sys
 import tempfile
-import time
+import threading
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -98,6 +98,16 @@ class ComandoDoScrollLivre(unittest.TestCase):
         cmd = runner(scroll=True, scroll_lists=2, limite=5).comando()
         self.assertEqual(cmd[cmd.index("--limite-por-lista") + 1], "5")
 
+    def test_scroll_leva_o_tempo_maximo_por_lista(self):
+        cmd = runner(scroll=True, scroll_lists=2).comando()
+        self.assertEqual(cmd[cmd.index("--max-minutos") + 1],
+                         str(st.MAX_MINUTOS_POR_LISTA))
+
+    def test_modo_arquivo_nao_recebe_max_minutos(self):
+        """O modo CSV (em uso) nao conhece --max-minutos: mandar la derrubaria
+        a rodada em erro de argparse."""
+        self.assertNotIn("--max-minutos", runner().comando())
+
     def test_sem_limite_pedido_nao_manda_o_argumento(self):
         """0 (ou omitido) preserva o comportamento de sempre: lista cheia,
         sem novidade para quem ja usava a estacao."""
@@ -120,17 +130,27 @@ class ParadaSegura(unittest.TestCase):
 
         fila: queue.Queue = queue.Queue()
         terminou: list[int] = []
-        r = runner(log_queue=fila, on_finish=terminou.append)
+        # NAO esperar com time.sleep aqui. `test_scroll_local.py` faz
+        # `spike_ios.time.sleep = lambda s: None` no import, e `spike_ios.time`
+        # E o modulo `time`: rodar as duas suites no MESMO processo
+        # (`python -m unittest test_scroll_local test_gui_runner ...`) deixa
+        # time.sleep sem efeito para todo mundo. A espera por polling passava
+        # voando e este teste ficava vermelho SO no comando com varios modulos
+        # — um vermelho que nunca reproduzia sozinho. threading.Event.wait usa
+        # o relogio do SO e nao depende de time.sleep.
+        pronto = threading.Event()
+
+        def encerrou(codigo):
+            terminou.append(codigo)
+            pronto.set()
+        r = runner(log_queue=fila, on_finish=encerrou)
         r.comando = lambda: [sys.executable, script]   # troca só o alvo
         r.start()
 
-        linha = fila.get(timeout=15)
+        linha = fila.get(timeout=60)
         self.assertEqual(linha, ("log", "comecou"))
         r.stop()
-        for _ in range(60):
-            if terminou:
-                break
-            time.sleep(0.25)
+        pronto.wait(60)
         self.assertTrue(terminou, "o processo não encerrou depois do Parar")
         self.assertNotEqual(terminou[0], 0)
         # A interface sabe que foi ela quem parou: o desfecho não depende do

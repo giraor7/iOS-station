@@ -49,7 +49,7 @@ reaproveitá-lo em vez de recompilar a cada sessão:
 
 ```bash
 LL_PREBUILT_WDA=1 python3 spike_ios.py --contacts contacts.example.csv \
-  --udid <UDID> --wda-bundle com.isabella.wda2026 --trust-profile
+  --wda-bundle com.isabella.wda2026 --trust-profile
 ```
 
 (Vale para `run_ios.py` e `bench_ios.py` também — é só prefixar `LL_PREBUILT_WDA=1`.)

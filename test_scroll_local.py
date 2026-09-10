@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sys
 import tempfile
@@ -74,6 +75,8 @@ class Modelo:
         self.falhar_clique_sempre = set()   # indices cujo click NUNCA funciona
         self.falhar_clique_uma_vez = set()  # indices cujo click falha na 1a vez
         self.sem_rotulo = set()             # indices cujo label/name volta vazio
+        self.altura_custom: dict = {}       # indice -> altura diferente da linha padrao
+        self.rect_ilegivel: set = set()     # indices cujo .rect levanta excecao (stale)
         self.chamadas_app_front = 0
 
     def tocar_em(self, x, y):
@@ -120,7 +123,11 @@ class FakeCell:
 
     @property
     def rect(self):
-        return {"x": 0, "y": self.m.y_de(self.i), "width": self.m.largura, "height": self.m.linha}
+        if self.i in self.m.rect_ilegivel:
+            raise WebDriverException("stale element reference: the element is not "
+                                      "attached to the page document")
+        altura = self.m.altura_custom.get(self.i, self.m.linha)
+        return {"x": 0, "y": self.m.y_de(self.i), "width": self.m.largura, "height": altura}
 
     def get_attribute(self, a):
         if self.i in self.m.sem_rotulo:
@@ -761,8 +768,10 @@ class ProgressoArquivo(unittest.TestCase):
         path = os.path.join(tmp, "p.json")
         p = rs.Progresso(path)
         self.assertEqual(p.offset, 0)
-        p.registrar_lista(256, "h1", "h256", "Contato 0255")
-        p.registrar_lista(256, "h257", "h512", "Contato 0511")
+        p.registrar_lista([("h1", "nome1")] + [(f"h{i}", f"nome{i}") for i in range(2, 256)]
+                          + [("h256", "Contato 0255")])
+        p.registrar_lista([("h257", "nome257")] + [(f"h{i}", f"nome{i}") for i in range(258, 512)]
+                          + [("h512", "Contato 0511")])
         q = rs.Progresso(path)
         self.assertEqual(q.offset, 512)
         self.assertEqual(q.listas_criadas, 2)
@@ -771,6 +780,55 @@ class ProgressoArquivo(unittest.TestCase):
         self.assertEqual(len(q.historico), 2)
         self.assertIn("513", q.resumo())
         self.assertNotIn("Contato 0511", q.resumo())   # resumo nunca mostra o nome
+
+
+class ProgressoV2GravaHashesEMigra(unittest.TestCase):
+    """Progresso versao 2: cada lista CRIADA grava os hashes de todo contato
+    que entrou nela, e prog.usados e a uniao de todos esses hashes (a guarda
+    contra duplicata, ver ScrollLivre.selecionar). Um arquivo v1 (sem
+    'hashes') tem de carregar sem excecao, com a guarda comecando vazia; e um
+    campo desconhecido (de uma versao futura) tem de sobreviver a um
+    salvar()."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def test_registrar_lista_grava_hashes_e_migra_v1(self):
+        nomes = nomes_ordenados(5)
+        ordem = [(rs.hash_nome(n), n) for n in nomes]
+        prog = rs.Progresso(self.path)
+        prog.registrar_lista(ordem)
+        recarregado = rs.Progresso(self.path)
+        self.assertEqual(recarregado.usados, {h for h, _ in ordem})
+        with open(self.path, encoding="utf-8") as f:
+            d = json.load(f)
+        self.assertEqual(d["versao"], 2)
+
+    def test_arquivo_v1_sem_hashes_carrega_com_guarda_vazia(self):
+        d = {
+            "versao": 1, "modo": "scroll-livre", "offset": 5, "listas_criadas": 1,
+            "ultimo_rotulo": "Contato 0004", "ultimo_hash": rs.hash_nome("Contato 0004"),
+            "historico": [{"lista": 1, "quantidade": 5, "primeiro_hash": "x",
+                           "ultimo_hash": "y", "criada_em": "2026-01-01T00:00:00"}],
+        }
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        prog = rs.Progresso(self.path)   # nao pode levantar excecao
+        self.assertEqual(prog.usados, set())
+        self.assertEqual(prog.offset, 5)
+
+    def test_campo_de_versao_futura_sobrevive_ao_salvar(self):
+        d = {
+            "versao": 1, "offset": 0, "listas_criadas": 0, "historico": [],
+            "campo_do_futuro": 1,
+        }
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        prog = rs.Progresso(self.path)
+        prog.salvar()
+        with open(self.path, encoding="utf-8") as f:
+            recarregado = json.load(f)
+        self.assertEqual(recarregado.get("campo_do_futuro"), 1)
 
 
 # ---------------------------------------------------------------------------
@@ -861,7 +919,7 @@ class SalvamentoParcial(unittest.TestCase):
         if sp.parada:
             if qtd >= 2 and sp.wait_for("picker_anchor", timeout=1, required=False) is not None:
                 sp.finish(approve_create=True)
-                prog.registrar_lista(qtd, sp.ordem[0][0], sp.ordem[-1][0], sp.ordem[-1][1])
+                prog.registrar_lista(sp.ordem)
                 return "parcial", qtd
             return "perdido", qtd
         return "completo", qtd
@@ -1040,6 +1098,64 @@ class LeituraVaziaLenta(unittest.TestCase):
         self.assertEqual(sp.parada, "")
 
 
+class OrcamentoDeRelogio(unittest.TestCase):
+    """--max-minutos: orcamento de RELOGIO por lista, checado uma vez por
+    tela (nunca por contato — isso seria mais um caminho de pular gente). O
+    teto de telas limita TRABALHO; este limita TEMPO; o primeiro que estourar
+    vence, com o MESMO desfecho (parada nomeada + salvamento parcial)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "p.json")
+
+    def test_estoura_o_orcamento_vira_desfecho_nomeado(self):
+        nomes = nomes_ordenados(5000)
+        m, sp = novo(nomes, limite=256)
+        m.custo_consulta = 2.0
+        sp.max_segundos = 20
+        with com_relogio(m):
+            qtd = sp.selecionar(rs.Progresso(self.path))
+        self.assertEqual(sp.parada, "orcamento de tempo da lista")
+        self.assertGreater(qtd, 0)
+        self.assertLess(qtd, 256)
+        self.assertLess(sp.stats["telas"], sp.max_telas,
+                        "estourou o teto de TELAS, nao o de TEMPO — o teste nao "
+                        "prova nada sobre o orcamento de relogio")
+
+    def test_orcamento_nao_pula_contato(self):
+        nomes = nomes_ordenados(5000)
+        m = Modelo(nomes)
+        m.custo_consulta = 2.0
+        with com_relogio(m):
+            codigo = rodar_main(m, ["--trust-profile", "--approve-create",
+                                    "--limite-por-lista", "256", "--max-listas", "1",
+                                    "--max-minutos", "0.34"], self.path)
+        self.assertEqual(codigo, 6)
+        qtd = len(m.selecionados)
+        self.assertTrue(0 < qtd < 256)
+        # prefixo CONTIGUO: ninguem no meio ficou faltando.
+        self.assertEqual(sorted(m.selecionados), list(range(qtd)))
+        self.assertTrue(all(v == 1 for v in m.toques.values()))
+        prog = rs.Progresso(self.path)
+        self.assertEqual(prog.ultimo_hash, rs.hash_nome(nomes[qtd - 1]))
+
+    def test_o_orcamento_cobre_a_retomada(self):
+        """O relogio nasce na 1a linha de selecionar() — ANTES de _retomar —
+        entao uma retomada patologica (agenda gigante + WDA lento) tambem
+        para, em vez de rodar as MAX_TELAS_RETOMADA telas as cegas."""
+        nomes = nomes_ordenados(5000)
+        m, sp = novo(nomes, limite=50)
+        m.custo_consulta = 3.0
+        sp.max_segundos = 5
+        prog = progresso_apos(nomes, 900, self.path)
+        with com_relogio(m):
+            with self.assertRaises(spike_ios.UiChanged):
+                sp.selecionar(prog)
+        self.assertEqual(sp.parada, "orcamento de tempo da lista (durante a retomada)")
+        self.assertEqual(sp.stats["toques"], 0)
+        self.assertEqual(prog.offset, 901)   # progresso nao mudou (nada foi tocado)
+
+
 class RectsSemLimite(unittest.TestCase):
     """Sem elementResponseAttributes, quando a inferencia de posicao falha
     (cabecalho de secao) e a tela tem MUITOS elementos ao mesmo tempo, ler um
@@ -1177,7 +1293,10 @@ class MainSalvamentoParcial(unittest.TestCase):
         m.dialogo_apos = 3            # o seletor some e nao volta
         codigo = self._rodar(m, ["--trust-profile", "--approve-create", "--turbo",
                                  "--limite-por-lista", "40", "--max-listas", "1"])
-        self.assertEqual(codigo, 4)
+        # codigo 7 ("parou por uma regra da estacao"), nao 4 ("UI mudou"): a
+        # causa e a ancora nao confirmada apos a rajada turbo (self.parada
+        # setado explicitamente), nao uma tela desconhecida para inventariar.
+        self.assertEqual(codigo, 7)
         self.assertFalse(os.path.exists(self.path))
 
     def test_ensaio_interrompido_cancela_o_seletor_em_vez_de_deixar_sujo(self):
@@ -1195,7 +1314,10 @@ class MainSalvamentoParcial(unittest.TestCase):
                                      "--limite-por-lista", "60", "--max-listas", "1"])
         finally:
             rs.ScrollLivre.cancelar_seletor = orig_cancel
-        self.assertEqual(codigo, 4)
+        # codigo 7: o seletor ja foi cancelado, nada de UI desconhecida a
+        # inventariar — 4 seria mentira aqui (mandaria o operador ao suporte
+        # por um motivo que ja foi tratado no proprio ensaio).
+        self.assertEqual(codigo, 7)
         self.assertTrue(cancelou, "o ensaio parou e deixou o seletor marcado no iPhone")
         self.assertFalse(os.path.exists(self.path))
 
@@ -1268,6 +1390,60 @@ class AncoraLentaDepoisDaRajada(unittest.TestCase):
         self.assertNotIn("nao foi criada", ultimo["motivo_da_parada"],
                          "o progresso afirma que a lista nao foi criada — e ela foi")
         self.assertIn("conferir_no_iphone", ultimo)
+
+    def _lista_com_incertos(self):
+        """Reproduz o mesmo cenario do teste acima e devolve (m, path) com uma
+        lista PARCIAL ja registrada com toques_incertos pendentes."""
+        m = Modelo(nomes_ordenados(60))
+        m.ocultar_ancora_apos_toques = 15
+        orig_sel = rs.ScrollLivre.selecionar
+
+        def devolver_a_ancora(sp, prog):
+            try:
+                return orig_sel(sp, prog)
+            finally:
+                m.ocultar_ancora_apos_toques = None
+        rs.ScrollLivre.selecionar = devolver_a_ancora
+        try:
+            rodar_main(m, ["--trust-profile", "--approve-create", "--turbo",
+                           "--limite-por-lista", "60", "--max-listas", "1"], self.path)
+        finally:
+            rs.ScrollLivre.selecionar = orig_sel
+        return m
+
+    def test_incertos_ficam_fora_da_guarda_por_padrao(self):
+        self._lista_com_incertos()
+        prog = rs.Progresso(self.path)
+        incertos = prog.historico[-1]["toques_incertos"]
+        self.assertTrue(incertos)
+        for h in incertos:
+            self.assertNotIn(h, prog.usados,
+                             "um toque em duvida entrou na guarda sem confirmacao")
+        self.assertFalse(prog.historico[-1]["incertos_resolvidos"])
+        self.assertEqual(prog.incertos_pendentes(), [(0, prog.historico[0])])
+
+    def test_resolver_incertos_entraram_bloqueia(self):
+        self._lista_com_incertos()
+        codigo = rodar_main(Modelo(nomes_ordenados(1)), ["--resolver-incertos", "entraram"],
+                            self.path)
+        self.assertEqual(codigo, 0)
+        prog = rs.Progresso(self.path)
+        incertos = prog.historico[-1]["toques_incertos"]
+        for h in incertos:
+            self.assertIn(h, prog.usados)
+        self.assertTrue(prog.historico[-1]["incertos_resolvidos"])
+        self.assertEqual(prog.historico[-1]["incertos_decisao"], "entraram")
+        self.assertEqual(prog.incertos_pendentes(), [])
+
+    def test_aviso_de_incertos_aparece_no_log(self):
+        self._lista_com_incertos()
+        prog = rs.Progresso(self.path)
+        n_incertos = len(prog.historico[-1]["toques_incertos"])
+        with CapturaLog() as cap:
+            rs._avisar_incertos_pendentes(prog)
+        self.assertIn("em duvida", cap.texto)
+        self.assertIn(str(n_incertos), cap.texto)
+        self.assertIn("--resolver-incertos", cap.texto)
 
 
 class FallbackDaRajadaNaoDescartaContato(unittest.TestCase):
@@ -1343,6 +1519,250 @@ class ContatoTravadoNaoEPulado(unittest.TestCase):
                          "contato inalcancavel (2 falhas de toque na mesma tela)")
 
 
+class GuardaContraDuplicata(unittest.TestCase):
+    """A guarda: nenhuma celula cujo hash ja esteja em prog.usados (contatos
+    que ja entraram numa lista CRIADA em rodada anterior) e tocada — mesmo
+    quando a retomada posicional erra o ponto exato (a hipotese medida e
+    provada no simulador: a retomada pode parar cedo demais e repetir gente).
+    """
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def test_guarda_nao_toca_quem_ja_entrou_em_lista_anterior(self):
+        nomes = nomes_ordenados(10)
+        m1, sp1 = novo(nomes, limite=5)
+        prog = rs.Progresso(self.path)
+        sp1.selecionar(prog)
+        self.assertEqual(sorted(m1.selecionados), [0, 1, 2, 3, 4])
+        prog.registrar_lista(sp1.ordem)
+        self.assertEqual(prog.usados, {rs.hash_nome(n) for n in nomes[:5]})
+
+        # lista 2: retomada IMPRECISA (aponta so para o contato de indice 1,
+        # como se a ancora tivesse derivado) — sem a guarda, isto reabriria
+        # os contatos 2, 3 e 4.
+        prog2 = rs.Progresso(self.path)
+        prog2.ultimo_hash = rs.hash_nome(nomes[1])
+        prog2.ultimo_rotulo = nomes[1]
+        m2, sp2 = novo(nomes, limite=5)
+        qtd2 = sp2.selecionar(prog2)
+        self.assertEqual(qtd2, 5)
+        self.assertEqual(m2.toques[2], 0, "a guarda deixou o contato 2 ser re-tocado")
+        self.assertEqual(m2.toques[3], 0)
+        self.assertEqual(m2.toques[4], 0)
+        self.assertEqual(sp2.ordem[0][1], nomes[5],
+                         "a lista 2 devia comecar no primeiro contato NAO usado")
+        # A tela nao rola (agenda pequena, tudo visivel): os mesmos 3 hashes
+        # ja usados sao relidos em mais de uma passada, entao o contador soma
+        # mais de uma vez por hash — o que importa e que ele e > 0 e nenhum
+        # dos 3 foi tocado (ja conferido acima).
+        self.assertGreaterEqual(sp2.stats["bloqueados_guarda"], 3)
+
+    def test_guarda_e_dura_no_toque(self):
+        """Mesmo se algum caminho novo chamar _tocar/_tocar_lote diretamente
+        (fora do laco de selecionar, que ja filtra antes), a trava tem de
+        recusar o toque em vez de duplicar em silencio."""
+        nomes = nomes_ordenados(5)
+        m, sp = novo(nomes, limite=5)
+        alvo_hash = rs.hash_nome(nomes[0])
+        sp.usados = {alvo_hash}
+        cels = sp._ler_celulas()
+        cel = next(c for c in cels if c.hash == alvo_hash)
+        with self.assertRaises(spike_ios.UiChanged):
+            sp._tocar(cel)
+        self.assertEqual(m.toques[0], 0)
+        with self.assertRaises(spike_ios.UiChanged):
+            sp._tocar_lote([cel])
+        self.assertEqual(m.toques[0], 0)
+
+    def test_ensaio_nao_alimenta_a_guarda(self):
+        """registrar_lista() so e chamado quando a lista foi de fato CRIADA no
+        aparelho — um ensaio (sem --approve-create) nao pode alimentar
+        prog.usados, senao contatos que nunca entraram em lista nenhuma
+        ficariam bloqueados para sempre."""
+        nomes = nomes_ordenados(20)
+        m = Modelo(nomes)
+        rodar_main(m, ["--trust-profile", "--limite-por-lista", "5"], self.path)
+        self.assertFalse(os.path.exists(self.path),
+                         "o ensaio gravou progresso — deveria ser inerte")
+        m2 = Modelo(nomes)
+        codigo = rodar_main(m2, ["--trust-profile", "--approve-create",
+                                 "--limite-por-lista", "5", "--max-listas", "1"],
+                            self.path)
+        self.assertEqual(codigo, 0)
+        prog = rs.Progresso(self.path)
+        self.assertEqual(prog.usados, {rs.hash_nome(n) for n in nomes[:5]})
+
+
+class RecomecarDoA(unittest.TestCase):
+    """--recomecar-do-A: a saida de emergencia quando a retomada posicional
+    nao encontra o ponto (ancora apagada da agenda, ou a secao "#" no fim da
+    ordem do iOS). Zera a ancora de retomada MAS preserva a guarda — ninguem
+    ja incluido em lista e re-tocado."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "p.json")
+
+    def test_recomecar_do_A_nao_duplica(self):
+        nomes = nomes_ordenados(20)
+        m1 = Modelo(nomes)
+        codigo1 = rodar_main(m1, ["--trust-profile", "--approve-create",
+                                  "--limite-por-lista", "5", "--max-listas", "1"],
+                             self.path)
+        self.assertEqual(codigo1, 0)
+
+        codigo2 = rodar_main(Modelo(nomes), ["--recomecar-do-A"], self.path)
+        self.assertEqual(codigo2, 0)
+        prog = rs.Progresso(self.path)
+        self.assertEqual(prog.ultimo_hash, "")
+        self.assertEqual(prog.ultimo_rotulo, "")
+        self.assertEqual(len(prog.usados), 5)
+
+        m2 = Modelo(nomes)
+        codigo3 = rodar_main(m2, ["--trust-profile", "--approve-create",
+                                  "--limite-por-lista", "5", "--max-listas", "1"],
+                             self.path)
+        self.assertEqual(codigo3, 0)
+        for i in range(5):
+            self.assertEqual(m2.toques[i], 0,
+                             f"contato {i} (ja usado) foi tocado de novo")
+        self.assertEqual(sorted(m2.selecionados), list(range(5, 10)))
+        prog2 = rs.Progresso(self.path)
+        self.assertEqual(len(prog2.usados), 10)
+
+    def test_recomecar_do_A_recusa_progresso_sem_hashes(self):
+        d = {
+            "versao": 1, "modo": "scroll-livre", "offset": 15, "listas_criadas": 3,
+            "ultimo_rotulo": "Contato 0014", "ultimo_hash": rs.hash_nome("Contato 0014"),
+            "historico": [{"lista": 1, "quantidade": 5}, {"lista": 2, "quantidade": 5},
+                          {"lista": 3, "quantidade": 5}],
+        }
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        codigo = rodar_main(Modelo(nomes_ordenados(1)), ["--recomecar-do-A"], self.path)
+        self.assertEqual(codigo, 2)
+        with open(self.path, encoding="utf-8") as f:
+            bruto = json.load(f)
+        self.assertEqual(bruto["ultimo_hash"], rs.hash_nome("Contato 0014"))
+
+
+class HomonimoIgnoradoFicaRegistrado(unittest.TestCase):
+    """Um homonimo (mesmo nome ja tocado nesta lista) nunca e tocado de novo
+    (tocar de novo DESMARCARIA o primeiro) — e essa perda e PERMANENTE. Antes
+    era so um numero solto no log ('homonimos ignorados N'); agora fica
+    rastreavel no progresso, sem nunca gravar nome/numero em claro."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "p.json")
+
+    def test_homonimo_entra_no_historico_e_no_log(self):
+        nomes = nomes_ordenados(60)
+        nomes[7] = nomes[3]     # o contato 7 tem o MESMO NOME do contato 3
+        m = Modelo(nomes)
+        with CapturaLog() as cap:
+            codigo = rodar_main(m, ["--trust-profile", "--approve-create",
+                                    "--limite-por-lista", "20", "--max-listas", "1"],
+                                self.path)
+        self.assertEqual(codigo, 0)
+        prog = rs.Progresso(self.path)
+        self.assertEqual(prog.historico[-1]["homonimos_ignorados"],
+                         [rs.hash_nome(nomes[3])])
+        self.assertIn("MESMO NOME", cap.texto)
+        # mascaramento: nenhum rotulo de contato em claro no log.
+        self.assertNotIn("Contato 0007", cap.texto)
+        self.assertNotIn("Contato 0003", cap.texto)
+
+
+class CelulaSemRotuloNaoEUltrapassada(unittest.TestCase):
+    """Uma celula com a ALTURA DE UMA LINHA DE CONTATO que nao devolve nome em
+    duas leituras nao pode ser ultrapassada em silencio (o mesmo raciocinio da
+    divida (B) para 'contato inalcancavel'): a lista para ANTES dela, com o
+    que ja foi confirmado. Um cabecalho de secao — altura diferente — nao para
+    a lista: e so ignorado."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "p.json")
+
+    def test_para_antes_de_ultrapassar_a_celula_sem_rotulo(self):
+        m = Modelo(nomes_ordenados(60))
+        m.sem_rotulo = {7}     # celula de contato de verdade que nao devolve nome
+        codigo = rodar_main(m, ["--trust-profile", "--approve-create",
+                                "--limite-por-lista", "20", "--max-listas", "1"],
+                            self.path)
+        self.assertEqual(codigo, 6)
+        self.assertEqual(sorted(m.selecionados), list(range(7)),
+                         "a lista ultrapassou a celula sem rotulo")
+        prog = rs.Progresso(self.path)
+        self.assertEqual(prog.ultimo_hash, rs.hash_nome("Contato 0006"))
+        self.assertIn("sem rotulo", prog.historico[-1]["motivo_da_parada"])
+
+    def test_cabecalho_de_secao_nao_para_a_lista(self):
+        """Uma celula sem rotulo com altura BEM DIFERENTE da linha de contato
+        (cabecalho de secao, decoracao) e ignorada — nao para a lista."""
+        nomes = nomes_ordenados(30)
+        m, sp = novo(nomes, limite=20)
+        idx_cabecalho = 5
+        m.sem_rotulo = {idx_cabecalho}
+        m.altura_custom = {idx_cabecalho: Modelo.ALT_CABECALHO}
+        qtd = sp.selecionar(rs.Progresso(self.path))
+        self.assertEqual(qtd, 20)
+        self.assertEqual(sp.parada, "")
+        self.assertEqual(sp.stats["sem_rotulo"], 0)
+        self.assertGreaterEqual(sp.stats["sem_rotulo_ignorado"], 1)
+
+    def test_flag_explicita_pula_e_deixa_registro(self):
+        m = Modelo(nomes_ordenados(60))
+        m.sem_rotulo = {7}
+        codigo = rodar_main(m, ["--trust-profile", "--approve-create",
+                                "--limite-por-lista", "20", "--max-listas", "1",
+                                "--pular-celula-ilegivel"], self.path)
+        self.assertEqual(codigo, 0)
+        self.assertEqual(sorted(m.selecionados), list(range(7)) + list(range(8, 21)))
+        self.assertEqual(len(m.selecionados), 20)
+        prog = rs.Progresso(self.path)
+        # A mesma celula ilegivel pode ser reobservada em mais de uma leitura
+        # da tela (mesmo padrao ja aceito para 'bloqueados_guarda'); o que
+        # importa e que ela nunca foi tocada e ficou registrada.
+        self.assertTrue(prog.historico[-1]["celulas_sem_rotulo_puladas"])
+
+    def test_sem_a_flag_nao_pula(self):
+        """O par negativo: sem --pular-celula-ilegivel o comportamento e o
+        de sempre (parar), nao o de pular."""
+        m = Modelo(nomes_ordenados(60))
+        m.sem_rotulo = {7}
+        codigo = rodar_main(m, ["--trust-profile", "--approve-create",
+                                "--limite-por-lista", "20", "--max-listas", "1"],
+                            self.path)
+        self.assertEqual(codigo, 6)
+        self.assertEqual(sorted(m.selecionados), list(range(7)))
+
+
+class CelulaIlegivelNaoEUltrapassada(unittest.TestCase):
+    """Irmao gemeo do sem-rotulo: uma celula cujo .rect levanta excecao (fica
+    obsoleta porque a lista se moveu) tambem nao pode ser ultrapassada em
+    silencio — hoje ela some sem contador e sem aviso nenhum."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "p.json")
+
+    def test_rect_ilegivel_nao_e_ultrapassado(self):
+        nomes = nomes_ordenados(60)
+        m, sp = novo(nomes, limite=20)
+        m.attrs_na_resposta = False       # forca o caminho antigo (usa _rects)
+        m.cabecalhos = {2}                # quebra a inferencia de posicao
+        m.rect_ilegivel = {7}
+        qtd = sp.selecionar(rs.Progresso(self.path))
+        self.assertEqual(sorted(m.selecionados), list(range(7)),
+                         "a lista ultrapassou a celula com rect ilegivel")
+        self.assertEqual(sp.parada, rs.PARADA_SEM_RECT)
+        self.assertGreaterEqual(sp.stats["sem_rect"], 1)
+        self.assertLess(qtd, 20)
+
+
 class TravaDeAppEmPrimeiroPlano(unittest.TestCase):
     """A trava de app-em-primeiro-plano sobrevivia so pela ordem de duas linhas
     dentro de _checar_seguranca: trocando-as (a refatoracao mais natural do
@@ -1397,7 +1817,9 @@ class ParcialQueNaoConsegueCriar(unittest.TestCase):
         finally:
             rs.ScrollLivre.finish = orig_finish
         self.assertNotEqual(codigo, 6, "marcou como criada uma lista que nao foi criada")
-        self.assertEqual(codigo, 4)
+        # codigo 7: a causa e a rajada interrompida (parada nomeada), nao UI
+        # desconhecida — o finish() que falhou nao descobriu tela nenhuma.
+        self.assertEqual(codigo, 7)
         prog = rs.Progresso(self.path)
         self.assertEqual(prog.listas_criadas, 0)
         self.assertEqual(prog.offset, 0)
@@ -1424,9 +1846,11 @@ class TetoDeTelasChegaNoScrollLivre(unittest.TestCase):
         capturado = []
         orig_init = rs.ScrollLivre.__init__
 
-        def init_espiao(sp, driver, profile, limite=256, max_telas=rs.MAX_TELAS_POR_LISTA):
+        def init_espiao(sp, driver, profile, limite=256, max_telas=rs.MAX_TELAS_POR_LISTA,
+                        max_segundos=0.0):
             capturado.append(max_telas)
-            orig_init(sp, driver, profile, limite=limite, max_telas=max_telas)
+            orig_init(sp, driver, profile, limite=limite, max_telas=max_telas,
+                     max_segundos=max_segundos)
         rs.ScrollLivre.__init__ = init_espiao
         try:
             rodar_main(Modelo(nomes_ordenados(60)),
@@ -1507,7 +1931,8 @@ class ProgressoNaoVazaMaisDoQueOCombinado(unittest.TestCase):
 
     def test_arquivo_guarda_so_o_ultimo_nome_e_se_declara_sensivel(self):
         p = rs.Progresso(self.path)
-        p.registrar_lista(3, rs.hash_nome("Ana"), rs.hash_nome("Carlos"), "Carlos")
+        p.registrar_lista([(rs.hash_nome("Ana"), "Ana"), (rs.hash_nome("Bruno"), "Bruno"),
+                           (rs.hash_nome("Carlos"), "Carlos")])
         bruto = open(self.path, encoding="utf-8").read()
         d = json.loads(bruto)
         self.assertEqual(d["ultimo_rotulo"], "Carlos")
@@ -1529,6 +1954,470 @@ class ProgressoNaoVazaMaisDoQueOCombinado(unittest.TestCase):
                       "o README precisa dizer que o progresso do Scroll Livre guarda "
                       "o nome do ultimo contato (e o que o codigo faz)")
         self.assertIn("contatos.csv", trecho)
+
+
+# ---------------------------------------------------------------------------
+# auditoria 2026-09-10 (4a rodada): cada teste abaixo fica VERMELHO se a
+# correcao correspondente for revertida.
+# ---------------------------------------------------------------------------
+
+class GuardaIncompletaRecusaRecomecarDoA(unittest.TestCase):
+    """--recomecar-do-A so pode passar quando a guarda cobre TODAS as listas ja
+    criadas. A trava antiga perguntava se `usados` estava VAZIO — e bastava UMA
+    lista nova (que grava hashes) para ela liberar, enquanto a lista antiga do
+    arquivo v1 continuava desconhecida e era re-tocada inteira."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def _arquivo_v1_com_uma_lista(self, nomes):
+        """Progresso versao 1: uma lista ja criada, historico SEM hashes."""
+        d = {"versao": 1, "modo": "scroll-livre", "offset": 5, "listas_criadas": 1,
+             "ultimo_rotulo": nomes[4], "ultimo_hash": rs.hash_nome(nomes[4]),
+             "historico": [{"lista": 1, "quantidade": 5}]}
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+
+    def test_caso_misto_uma_lista_v1_mais_uma_lista_nova(self):
+        nomes = nomes_ordenados(30)
+        self._arquivo_v1_com_uma_lista(nomes)
+
+        # lista nova com este codigo: grava hashes, entao `usados` deixa de
+        # estar vazio — que era a unica pergunta da trava antiga.
+        codigo = rodar_main(Modelo(nomes), ["--trust-profile", "--approve-create",
+                                            "--limite-por-lista", "5",
+                                            "--max-listas", "1"], self.path)
+        self.assertEqual(codigo, 0)
+        prog = rs.Progresso(self.path)
+        self.assertEqual(len(prog.usados), 5, "so a lista NOVA tem impressao digital")
+        self.assertEqual(prog.listas_criadas, 2)
+        self.assertEqual(prog.guarda_incompleta(), 1)
+
+        with CapturaLog() as cap:
+            recusa = rodar_main(Modelo(nomes), ["--recomecar-do-A"], self.path)
+        self.assertEqual(recusa, 2,
+                         "--recomecar-do-A foi aceito com a guarda cobrindo so "
+                         "PARTE das listas: os 5 primeiros contatos entrariam "
+                         "numa segunda lista de transmissao")
+        self.assertIn("1 de 2", cap.texto,
+                      "a recusa precisa dizer QUANTAS listas estao sem impressao digital")
+        depois = rs.Progresso(self.path)
+        self.assertEqual(depois.ultimo_hash, prog.ultimo_hash,
+                         "a recusa nao pode ter zerado a ancora de retomada")
+
+    def test_guarda_completa_continua_sendo_aceita(self):
+        """A correcao nao pode fechar o caminho de emergencia legitimo."""
+        nomes = nomes_ordenados(20)
+        self.assertEqual(rodar_main(Modelo(nomes), ["--trust-profile",
+                                                    "--approve-create",
+                                                    "--limite-por-lista", "5",
+                                                    "--max-listas", "1"],
+                                    self.path), 0)
+        self.assertEqual(rs.Progresso(self.path).guarda_incompleta(), 0)
+        self.assertEqual(rodar_main(Modelo(nomes), ["--recomecar-do-A"], self.path), 0)
+        self.assertEqual(rs.Progresso(self.path).ultimo_hash, "")
+
+
+class BloqueadoDepoisDaRetomadaFicaRegistrado(unittest.TestCase):
+    """Duas pessoas DIFERENTES com o mesmo nome na agenda (trivial: "Mae",
+    "Casa", so o primeiro nome). A primeira entra na lista 1; a segunda, mais
+    adiante na agenda, bate na guarda na lista 2 e nao pode ser tocada — a
+    perda e PERMANENTE, e ate 2026-09-10 nao havia NENHUM registro dela: nem
+    no historico, nem no log, e o unico numero visivel mandava o operador
+    investigar "retomada imprecisa", o diagnostico errado.
+
+    Refutacao registrada (esta classe trava as duas pontas): NAO da para
+    separar esse caso da deriva de retomada por ordem alfabetica. Um homonimo
+    cross-lista carrega a chave do original, que e sempre <= a ancora; a deriva
+    devolve gente com chave > ancora. Por isso a estacao grava os DOIS e nomeia
+    as duas causas, em vez de afirmar a errada."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def test_homonimo_de_lista_anterior_fica_registrado(self):
+        nomes = nomes_ordenados(60)
+        nomes[25] = nomes[3]        # OUTRA pessoa, mesmo nome do contato 3
+        self.assertEqual(rodar_main(Modelo(nomes), ["--trust-profile",
+                                                    "--approve-create",
+                                                    "--limite-por-lista", "20",
+                                                    "--max-listas", "1"],
+                                    self.path), 0)
+        m2 = Modelo(nomes)
+        with CapturaLog() as cap:
+            codigo = rodar_main(m2, ["--trust-profile", "--approve-create",
+                                     "--limite-por-lista", "20",
+                                     "--max-listas", "1"], self.path)
+        self.assertEqual(codigo, 0)
+        self.assertEqual(m2.toques[25], 0, "o homonimo foi tocado (desmarcaria o outro)")
+        prog = rs.Progresso(self.path)
+        self.assertIn(rs.hash_nome(nomes[3]),
+                      prog.historico[-1].get("bloqueados_apos_retomada") or [],
+                      "o contato bloqueado depois da retomada nao foi registrado "
+                      "no historico: a perda fica invisivel")
+        self.assertIn("bloqueados_apos_retomada_aviso", prog.historico[-1])
+        self.assertIn("depois da retomada", cap.texto)
+        self.assertIn("mesmo nome", cap.texto)
+        # A GUI casa frases por substring: este aviso NAO pode ser traduzido
+        # como "Ponto de retomada encontrado." (frase de sucesso).
+        import gui_state as gst
+        for linha in cap.linhas:
+            if "depois da retomada" in linha:
+                self.assertNotEqual(gst.etapa_humana(linha),
+                                    "Ponto de retomada encontrado.",
+                                    "um aviso de possivel PERDA aparece na tela "
+                                    "como frase de sucesso")
+        self.assertNotIn("Contato 0025", cap.texto)
+
+    def test_deriva_de_retomada_nao_e_anunciada_como_perda_certa(self):
+        """Quando a ancora de retomada para CEDO demais, a tela reoferece gente
+        que ja esta em lista: sao as MESMAS pessoas e ninguem se perde. Elas
+        continuam somando em bloqueados_guarda e nao podem virar "perda
+        permanente" no aviso de homonimo dentro da lista."""
+        nomes = nomes_ordenados(10)
+        m1, sp1 = novo(nomes, limite=5)
+        prog = rs.Progresso(self.path)
+        sp1.selecionar(prog)
+        prog.registrar_lista(sp1.ordem)
+
+        prog2 = rs.Progresso(self.path)
+        prog2.ultimo_hash = rs.hash_nome(nomes[1])   # ancora derivou para tras
+        prog2.ultimo_rotulo = nomes[1]
+        m2, sp2 = novo(nomes, limite=5)
+        sp2.selecionar(prog2)
+        self.assertEqual(m2.toques[2], 0)
+        self.assertGreaterEqual(sp2.stats["bloqueados_guarda"], 3)
+        self.assertEqual(sp2.homonimos, [],
+                         "re-observacao por deriva de retomada foi anunciada como "
+                         "homonimo DENTRO da lista (perda permanente certa) — a "
+                         "estacao nao sabe disso e nao pode afirmar")
+        self.assertTrue(sp2.bloqueados_apos_retomada,
+                        "a estacao precisa registrar os bloqueios pos-retomada: "
+                        "e o unico rastro quando a causa e homonimo cross-lista")
+
+
+class TetoDeTelasDaListaDeRecuperacao(unittest.TestCase):
+    """O teto de telas do caminho de emergencia (--recomecar-do-A) nao tinha
+    nenhum teste: remover o bloco inteiro deixava as suites verdes."""
+
+    def test_cresce_com_a_guarda(self):
+        base = rs.MAX_TELAS_POR_LISTA
+        pequeno = rs.max_telas_para_recuperacao(100, base)
+        grande = rs.max_telas_para_recuperacao(3000, base)
+        self.assertGreater(grande, pequeno,
+                           "o teto de recuperacao nao cresce com o tamanho da guarda")
+        self.assertGreaterEqual(pequeno, base, "o piso da lista comum foi perdido")
+
+    def test_nunca_passa_do_teto_absoluto(self):
+        self.assertEqual(rs.max_telas_para_recuperacao(100000, rs.MAX_TELAS_POR_LISTA),
+                         rs.TETO_RECUPERACAO)
+
+    def test_main_de_fato_eleva_o_teto_na_lista_de_recuperacao(self):
+        """A conta certa nao adianta se main() nao a usar: o mutante que
+        removia o bloco inteiro sobrevivia a um teste so da funcao."""
+        path = os.path.join(tempfile.mkdtemp(), "p.json")
+        n = 3000
+        d = {"versao": 2, "modo": "scroll-livre", "offset": n, "listas_criadas": 1,
+             "ultimo_rotulo": "", "ultimo_hash": "",
+             "historico": [{"lista": 1, "quantidade": n,
+                            "hashes": [rs.hash_nome("usado %d" % i) for i in range(n)]}]}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        vistos = []
+        orig = rs.ScrollLivre.__init__
+
+        def espiao(self, *a, **kw):
+            vistos.append(kw.get("max_telas"))
+            return orig(self, *a, **kw)
+        rs.ScrollLivre.__init__ = espiao
+        try:
+            # --max-minutos 0 = sem limite: a recusa antecipada nao entra em cena,
+            # o que fica sob teste aqui e so o teto de telas.
+            rodar_main(Modelo(nomes_ordenados(30)),
+                       ["--trust-profile", "--approve-create",
+                        "--limite-por-lista", "5", "--max-minutos", "0"], path)
+        finally:
+            rs.ScrollLivre.__init__ = orig
+        self.assertTrue(vistos, "main() nao chegou a montar a lista")
+        self.assertEqual(vistos[0], rs.max_telas_para_recuperacao(n, rs.MAX_TELAS_POR_LISTA))
+        self.assertGreater(vistos[0], rs.MAX_TELAS_POR_LISTA,
+                           "main() nao elevou o teto de telas da lista de "
+                           "recuperacao: ela para em 'teto de telas' ainda rolando "
+                           "por gente ja usada, sem chegar em ninguem novo")
+
+    def test_travessia_e_a_conta_que_a_recusa_usa(self):
+        self.assertEqual(rs.telas_para_atravessar_guarda(0), 0)
+        self.assertEqual(rs.telas_para_atravessar_guarda(3000),
+                         math.ceil(3000 / rs.CONTATOS_NOVOS_POR_TELA_ESTIMADO))
+
+
+class ListaDeRecuperacaoQueNaoCabeNoTempoERecusada(unittest.TestCase):
+    """As duas travas (teto de TELAS e orcamento de RELOGIO) usam a mesma
+    calibracao e nunca se falavam: o teto prometia ~125 min enquanto o
+    orcamento que a GUI sempre manda (60 min) cortava antes de a lista chegar
+    em QUALQUER contato novo — 0 toques, nada criado, progresso parado, e a
+    rodada seguinte identica (livelock)."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def _progresso_de_recuperacao(self, n_usados):
+        d = {"versao": 2, "modo": "scroll-livre", "offset": n_usados,
+             "listas_criadas": 1, "ultimo_rotulo": "", "ultimo_hash": "",
+             "historico": [{"lista": 1, "quantidade": n_usados,
+                            "hashes": [rs.hash_nome("usado %d" % i)
+                                       for i in range(n_usados)]}]}
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+
+    def test_recusa_na_largada_com_o_numero_que_resolve(self):
+        import gui_state as gst
+        self._progresso_de_recuperacao(600)   # 600/5 = 120 telas so de travessia
+        with CapturaLog() as cap:
+            codigo = rodar_main(Modelo(nomes_ordenados(10)),
+                                ["--trust-profile", "--approve-create",
+                                 "--limite-por-lista", "5", "--max-minutos", "1"],
+                                self.path)
+        self.assertEqual(codigo, 8,
+                         "a rodada gastou o tempo inteiro em vez de recusar na largada")
+        self.assertIn("nao cabe no tempo maximo", cap.texto)
+        self.assertIn("--max-minutos", cap.texto)
+        self.assertIn(8, gst._DESFECHOS, "o codigo 8 nao tem traducao humana na GUI")
+
+    def test_cabe_no_tempo_a_rodada_segue(self):
+        self._progresso_de_recuperacao(20)    # 4 telas de travessia
+        codigo = rodar_main(Modelo(nomes_ordenados(30)),
+                            ["--trust-profile", "--approve-create",
+                             "--limite-por-lista", "5", "--max-minutos", "60"],
+                            self.path)
+        self.assertEqual(codigo, 0)
+
+
+class ResolverIncertosMantemOsNumerosCoerentes(unittest.TestCase):
+    """--resolver-incertos entraram punha os hashes na guarda (correto) mas
+    nao mexia em offset/quantidade: o resumo passava a relatar MENOS gente do
+    que ha de verdade, para sempre."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def _lista_com_incertos(self):
+        m = Modelo(nomes_ordenados(60))
+        m.ocultar_ancora_apos_toques = 15
+        orig_sel = rs.ScrollLivre.selecionar
+
+        def devolver_a_ancora(sp, prog):
+            try:
+                return orig_sel(sp, prog)
+            finally:
+                m.ocultar_ancora_apos_toques = None
+        rs.ScrollLivre.selecionar = devolver_a_ancora
+        try:
+            rodar_main(m, ["--trust-profile", "--approve-create", "--turbo",
+                           "--limite-por-lista", "60", "--max-listas", "1"], self.path)
+        finally:
+            rs.ScrollLivre.selecionar = orig_sel
+        return m
+
+    def test_entraram_sobe_offset_e_quantidade(self):
+        self._lista_com_incertos()
+        antes = rs.Progresso(self.path)
+        offset_antes = antes.offset
+        n_incertos = len(antes.historico[-1]["toques_incertos"])
+        self.assertGreater(n_incertos, 0)
+
+        self.assertEqual(rodar_main(Modelo(nomes_ordenados(1)),
+                                    ["--resolver-incertos", "entraram"], self.path), 0)
+        prog = rs.Progresso(self.path)
+        self.assertEqual(prog.offset, offset_antes + n_incertos,
+                         "o resumo continua anunciando menos contatos do que a "
+                         "lista do iPhone tem")
+        self.assertEqual(prog.historico[-1]["quantidade"],
+                         len(prog.historico[-1]["hashes"]))
+        self.assertEqual(prog.offset, len(prog.usados))
+
+    def test_resolver_duas_vezes_nao_conta_duas_vezes(self):
+        self._lista_com_incertos()
+        rodar_main(Modelo(nomes_ordenados(1)), ["--resolver-incertos", "entraram"],
+                   self.path)
+        offset = rs.Progresso(self.path).offset
+        rodar_main(Modelo(nomes_ordenados(1)), ["--resolver-incertos", "entraram"],
+                   self.path)
+        self.assertEqual(rs.Progresso(self.path).offset, offset)
+
+
+class ResolverIncertosSoMexeNaListaPedida(unittest.TestCase):
+    """Sem o filtro `--lista`, resolver UMA lista bloquearia os incertos de
+    TODAS — gente que provavelmente nao entrou em lista nenhuma ficaria
+    bloqueada para sempre pela guarda."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def _duas_listas_com_incertos(self):
+        prog = rs.Progresso(self.path)
+        for lista in (1, 2):
+            hashes = [rs.hash_nome("lista%d contato %d" % (lista, i)) for i in range(4)]
+            prog.registrar_lista([(h, "lista%d contato %d" % (lista, i))
+                                  for i, h in enumerate(hashes)])
+            incertos = [rs.hash_nome("lista%d incerto %d" % (lista, i)) for i in range(2)]
+            prog.historico[-1]["toques_incertos"] = incertos
+            prog.historico[-1]["incertos_resolvidos"] = False
+            prog.historico[-1]["incertos_decisao"] = None
+        prog.salvar()
+        return prog
+
+    def test_lista_2_nao_e_afetada_ao_resolver_a_lista_1(self):
+        antes = self._duas_listas_com_incertos()
+        incertos_2 = list(antes.historico[1]["toques_incertos"])
+        codigo = rodar_main(Modelo(nomes_ordenados(1)),
+                            ["--resolver-incertos", "entraram", "--lista", "1"],
+                            self.path)
+        self.assertEqual(codigo, 0)
+        prog = rs.Progresso(self.path)
+        self.assertTrue(prog.historico[0]["incertos_resolvidos"])
+        self.assertFalse(prog.historico[1].get("incertos_resolvidos"),
+                         "resolver a lista 1 marcou a lista 2 como resolvida")
+        for h in incertos_2:
+            self.assertNotIn(h, prog.usados,
+                             "um incerto da lista 2 foi bloqueado na guarda sem "
+                             "ninguem ter conferido a lista 2 no iPhone")
+        for h in antes.historico[0]["toques_incertos"]:
+            self.assertIn(h, prog.usados)
+
+
+class MaxMinutosNegativoERecusado(unittest.TestCase):
+    """Sem a validacao, `--max-minutos -5` chega a ScrollLivre como -300 e
+    `max(0.0, -300)` = 0.0, que e o valor de 'orcamento DESLIGADO': o operador
+    pediu um limite e o limite foi ignorado sem uma linha de log."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def test_recusa_antes_de_montar_a_lista(self):
+        criados = []
+        orig = rs.ScrollLivre.__init__
+
+        def espiao(self, *a, **kw):
+            criados.append(kw.get("max_segundos"))
+            return orig(self, *a, **kw)
+        rs.ScrollLivre.__init__ = espiao
+        try:
+            codigo = rodar_main(Modelo(nomes_ordenados(10)),
+                                ["--trust-profile", "--approve-create",
+                                 "--limite-por-lista", "5", "--max-minutos", "-1"],
+                                self.path)
+        finally:
+            rs.ScrollLivre.__init__ = orig
+        self.assertEqual(codigo, 2)
+        self.assertEqual(criados, [], "a lista chegou a ser montada com um "
+                                      "orcamento negativo (= desligado)")
+
+    def test_zero_desliga_sem_disfarcar_de_estouro(self):
+        sp = rs.ScrollLivre(FakeDriver(Modelo(nomes_ordenados(3))), BASELINE,
+                            limite=2, max_segundos=0.0)
+        sp._t_inicio_lista = 0.0
+        self.assertFalse(sp._orcamento_estourou(),
+                         "0 tem de significar 'sem limite', nunca 'ja estourou'")
+
+
+class AvisoDeIncertosEstaLigadoEmMain(unittest.TestCase):
+    """O aviso repetido a cada rodada e uma decisao humana que nao pode se
+    perder entre rodadas — mas so o TEXTO do helper tinha teste: apagar as
+    duas chamadas em main() deixava as suites verdes."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def _progresso_com_incertos(self):
+        prog = rs.Progresso(self.path)
+        hashes = [rs.hash_nome("contato %d" % i) for i in range(4)]
+        prog.registrar_lista([(h, "contato %d" % i) for i, h in enumerate(hashes)])
+        prog.historico[-1]["toques_incertos"] = [rs.hash_nome("duvida 1"),
+                                                 rs.hash_nome("duvida 2")]
+        prog.historico[-1]["incertos_resolvidos"] = False
+        prog.historico[-1]["incertos_decisao"] = None
+        prog.salvar()
+
+    def test_o_aviso_sai_no_caminho_do_progresso(self):
+        self._progresso_com_incertos()
+        with CapturaLog() as cap:
+            codigo = rodar_main(Modelo(nomes_ordenados(1)), ["--progresso"], self.path)
+        self.assertEqual(codigo, 0)
+        self.assertIn("em duvida", cap.texto)
+        self.assertIn("--resolver-incertos", cap.texto)
+
+    def test_o_aviso_sai_tambem_na_rodada_normal(self):
+        self._progresso_com_incertos()
+        with CapturaLog() as cap:
+            rodar_main(Modelo(nomes_ordenados(30)),
+                       ["--trust-profile", "--approve-create",
+                        "--limite-por-lista", "5", "--max-listas", "1"], self.path)
+        self.assertIn("em duvida", cap.texto)
+        self.assertIn("--resolver-incertos", cap.texto)
+
+
+class WdaMortoNaoSaiComoRegraDaEstacao(unittest.TestCase):
+    """O WDA caindo no meio da selecao ("socket hang up", porta 8100 recusada)
+    saia como codigo 7 — "Parou por uma regra da estacao... Nada foi perdido",
+    em ambar — e a GUI so consulta o diagnostico do WDA quando o tom e "erro".
+    A operadora lia "e so uma regra" e re-rodava contra um WDA morto."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def _rodar_com_wda_morto(self, argv):
+        orig_sel = rs.ScrollLivre.selecionar
+        orig_wait = rs.ScrollLivre.wait_for
+
+        def morre(sp, prog):
+            raise WebDriverException("socket hang up")
+
+        def wait_morto(sp, *a, **kw):
+            raise WebDriverException("connection refused")
+        rs.ScrollLivre.selecionar = morre
+        rs.ScrollLivre.wait_for = wait_morto
+        try:
+            with CapturaLog() as cap:
+                codigo = rodar_main(Modelo(nomes_ordenados(30)), argv, self.path)
+            return codigo, cap.texto
+        finally:
+            rs.ScrollLivre.selecionar = orig_sel
+            rs.ScrollLivre.wait_for = orig_wait
+
+    def test_sai_como_erro_e_a_gui_da_as_instrucoes_do_wda(self):
+        import gui_state as gst
+        codigo, texto = self._rodar_com_wda_morto(
+            ["--trust-profile", "--approve-create", "--limite-por-lista", "5"])
+        self.assertNotEqual(codigo, 7,
+                            "WDA morto saiu como 'regra da estacao' (ambar): a "
+                            "operadora perde as instrucoes de recuperacao do WDA")
+        self.assertEqual(gst.desfecho_para(codigo).tom, "erro")
+        conhecido = gst.diagnosticar_log(texto)
+        self.assertIsNotNone(conhecido, "o log nao carrega o texto do WDA")
+        self.assertIn("WebDriverAgent", conhecido.titulo)
+
+    def test_ensaio_tambem_sai_como_erro(self):
+        codigo, _ = self._rodar_com_wda_morto(
+            ["--trust-profile", "--limite-por-lista", "5"])
+        self.assertNotEqual(codigo, 7)
+
+    def test_parada_por_regra_nomeada_continua_sendo_codigo_7(self):
+        """A correcao nao pode transformar toda parada em erro: uma regra
+        NOMEADA (UiChanged) continua saindo em ambar, como antes."""
+        orig_sel = rs.ScrollLivre.selecionar
+
+        def regra(sp, prog):
+            sp.parada = "teto de telas"
+            raise spike_ios.UiChanged("teto de telas")
+        rs.ScrollLivre.selecionar = regra
+        try:
+            codigo = rodar_main(Modelo(nomes_ordenados(30)),
+                                ["--trust-profile", "--limite-por-lista", "5"],
+                                self.path)
+        finally:
+            rs.ScrollLivre.selecionar = orig_sel
+        self.assertEqual(codigo, 7)
 
 
 if __name__ == "__main__":

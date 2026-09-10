@@ -50,6 +50,7 @@ import signal
 import sys
 import time
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -80,6 +81,27 @@ CONTATOS_NOVOS_POR_TELA_ESTIMADO = 5   # para estimar o teto de telas com filtro
 # nao e "continua rolando", e parar com salvamento parcial e motivo nomeado
 # ("teto de telas") para o operador decidir (DDD menos raro, agenda menor).
 TETO_TELAS_ABSOLUTO = 1200
+# Teto de telas para uma lista de RECUPERACAO (--recomecar-do-A): ela precisa
+# rolar por TODOS os contatos ja usados (a guarda bloqueia o toque, mas a
+# tela ainda precisa ser lida e rolada) antes de chegar em gente nova. Maior
+# que TETO_TELAS_ABSOLUTO de proposito — e um caminho de emergencia, nao a
+# operacao normal, e o desfecho de estouro continua sendo nomeado (salvamento
+# parcial), nunca perda.
+TETO_RECUPERACAO = 2500
+# Orcamento de RELOGIO por lista (--max-minutos). E a mesma grandeza que o
+# teto de telas expressa em TRABALHO (TETO_TELAS_ABSOLUTO=1200 telas ~ 1h a
+# 3s/tela): o teto de telas limita trabalho, o orcamento limita relogio, e o
+# primeiro que estourar vence — com o MESMO desfecho (parada nomeada +
+# salvamento parcial). gui_state.MAX_MINUTOS_POR_LISTA precisa bater com este
+# valor (ver teste de coerencia).
+ORCAMENTO_PADRAO_S = 3600.0
+# Calibracao unica de "quanto custa uma tela" (leitura + toques + rolagem).
+# Era o literal 3 espalhado pelo comentario do teto de telas e pela
+# mensagem da lista de recuperacao; virou constante para que o teto de
+# TRABALHO (telas) e o orcamento de RELOGIO (minutos) possam ser
+# comparados na MESMA unidade antes de a rodada comecar (ver
+# `max_telas_para_recuperacao` e a recusa antecipada em main()).
+SEGUNDOS_POR_TELA_ESTIMADO = 3.0
 # --turbo: rajada W3C. Toque curto e intervalo entre toques (ms). O iOS
 # registra toques distintos com folga acima de ~50 ms.
 TURBO_TOQUE_MS = 40
@@ -104,6 +126,15 @@ LEITURA_LENTA_S = 7.5       # metade do customSnapshotTimeout (15s): acima disto
 LIMITE_RECTS_INDIVIDUAIS = 40   # acima disto sem conseguir inferir posicao, para
                                 # em vez de pagar 1 chamada HTTP por elemento
                                 # (o custo que cresce com o numero de selecionados)
+# Discriminador de altura para separar, entre as celulas que a retentativa
+# (releitura da tela inteira) ainda nao consegue ler, uma linha de CONTATO
+# de um cabecalho de secao ("A", "B"...) ou outro elemento decorativo: a
+# altura de uma celula de contato e conhecida (a moda das celulas LEGIVEIS
+# desta mesma leitura); algo com altura bem diferente nao e contato e nao
+# para a lista.
+TOLERANCIA_ALTURA_LINHA = 2.0
+PARADA_SEM_ROTULO = "celula sem rotulo (nao da para saber quem e)"
+PARADA_SEM_RECT = "celula sem posicao legivel (o rect nao respondeu)"
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +243,31 @@ def teto_telas_para(limite_por_lista: int, filtro: dict | None) -> int:
     return min(max(MAX_TELAS_POR_LISTA, telas_estimadas), TETO_TELAS_ABSOLUTO)
 
 
+def telas_para_atravessar_guarda(n_usados: int) -> int:
+    """Quantas telas a lista de RECUPERACAO precisa rolar so para PASSAR por
+    quem ja esta em lista, antes de chegar em alguem novo. A guarda bloqueia o
+    toque, mas a tela ainda precisa ser lida e rolada."""
+    return math.ceil(max(0, int(n_usados)) / CONTATOS_NOVOS_POR_TELA_ESTIMADO)
+
+
+def max_telas_para_recuperacao(n_usados: int, teto_base: int) -> int:
+    """Teto de telas de uma lista de RECUPERACAO (--recomecar-do-A, ou a
+    primeira lista de um progresso que ja tem contatos usados e nao tem ancora
+    de retomada).
+
+    Ela rola a agenda desde o A e precisa atravessar TODOS os ja usados antes
+    de achar gente nova; por isso o teto normal nao serve. Folga de 1.3x
+    (mesma calibracao de `teto_telas_para`) mais o piso de uma lista comum,
+    limitado por TETO_RECUPERACAO. Estourar continua sendo salvamento parcial
+    com motivo nomeado, nunca perda.
+
+    Extraida de main() em 2026-09-10 (4a rodada) porque era o unico calculo do
+    caminho de emergencia sem nenhum teste: remover o bloco inteiro deixava as
+    suites verdes."""
+    estimado = math.ceil(telas_para_atravessar_guarda(n_usados) * 1.3) + MAX_TELAS_POR_LISTA
+    return min(max(int(teto_base), estimado), TETO_RECUPERACAO)
+
+
 def eh_convite(nome_ou_rotulo: str) -> bool:
     """Celula 'Convidar para o WhatsApp' (abre o app Mensagens se tocada).
     Decidido pelo rotulo JA LIDO — sem nenhuma chamada extra ao WDA."""
@@ -223,6 +279,12 @@ def eh_convite(nome_ou_rotulo: str) -> bool:
 # progresso
 # ---------------------------------------------------------------------------
 
+_CAMPOS_CONHECIDOS_PROGRESSO = {
+    "versao", "modo", "sensivel", "offset", "proximo_contato_n", "listas_criadas",
+    "ultimo_rotulo", "ultimo_hash", "atualizado_em", "historico",
+}
+
+
 class Progresso:
     def __init__(self, path: str):
         self.path = path
@@ -231,6 +293,15 @@ class Progresso:
         self.ultimo_rotulo = ""
         self.ultimo_hash = ""
         self.historico: list = []
+        # v2: hashes de TODO contato que ja entrou numa lista CRIADA (nunca
+        # ensaio) — a guarda contra duplicata (ver ScrollLivre.selecionar).
+        # Derivado de historico[i]['hashes'] na carga; nunca escrito por fora
+        # de registrar_lista().
+        self.usados: set = set()
+        self.versao = 1
+        # Campos desconhecidos de uma versao FUTURA do arquivo: preservados
+        # tal e qual para nao serem apagados quando esta versao regravar.
+        self._extra: dict = {}
         self.carregar()
 
     def carregar(self) -> None:
@@ -247,20 +318,39 @@ class Progresso:
         self.ultimo_rotulo = str(d.get("ultimo_rotulo", ""))
         self.ultimo_hash = str(d.get("ultimo_hash", ""))
         self.historico = list(d.get("historico", []))
+        self.versao = int(d.get("versao", 1))
+        self._extra = {k: v for k, v in d.items() if k not in _CAMPOS_CONHECIDOS_PROGRESSO}
+        self.usados = set()
+        for entrada in self.historico:
+            for h in (entrada.get("hashes") or []):
+                self.usados.add(h)
+        if self.versao > 2:
+            log.warning("progresso escrito por uma versao MAIS NOVA da estacao; "
+                        "atualize por git pull antes de rodar")
+        elif self.versao == 1 and self.listas_criadas:
+            log.warning("progresso da versao 1: a guarda contra duplicata comeca "
+                        "VAZIA (a(s) %d lista(s) ja criada(s) nao gravaram a lista "
+                        "de hashes); ela passa a valer a partir da proxima lista "
+                        "criada", self.listas_criadas)
 
     def salvar(self) -> None:
         d = {
-            "versao": 1,
+            "versao": 2,
+            **self._extra,
             "modo": "scroll-livre",
             # O arquivo guarda o NOME do ultimo contato de cada lista
             # ("ultimo_rotulo"). Nao da para trocar por hash: a retomada compara
             # esse nome em ORDEM ALFABETICA quando o contato foi apagado da
             # agenda entre uma lista e outra, e hash/prefixo truncado nao
             # ordenam (ver a decisao registrada em MODO-SCROLL-LIVRE.md).
-            # Por isso o arquivo e tao sensivel quanto o contatos.csv.
+            # Alem disso o arquivo agora guarda tambem uma impressao digital
+            # (hash) de TODO contato que ja entrou em lista — mesma
+            # sensibilidade do contatos.csv (o modo CSV ja faz isso: ver
+            # run_ios.py, que grava um hash por contato).
             "sensivel": ("contem o nome do ultimo contato de cada lista "
-                         "(necessario para retomar) — trate como o contatos.csv: "
-                         "fica so no Mac, nunca por e-mail/anexo"),
+                         "(necessario para retomar) e o hash de todo contato ja "
+                         "incluido em lista — trate como o contatos.csv: fica so "
+                         "no Mac, nunca por e-mail/anexo"),
             "offset": self.offset,
             "proximo_contato_n": self.offset + 1,
             "listas_criadas": self.listas_criadas,
@@ -274,8 +364,15 @@ class Progresso:
             json.dump(d, f, ensure_ascii=False, indent=2)
         os.replace(tmp, self.path)
 
-    def registrar_lista(self, quantidade: int, primeiro_hash: str, ultimo_hash: str,
-                        ultimo_rotulo: str) -> None:
+    def registrar_lista(self, ordem: list) -> None:
+        """`ordem` e sp.ordem: lista de (hash, nome) na ordem de toque. Quem
+        chama SEMPRE passa a lista inteira tocada nesta rodada — quantidade,
+        primeiro e ultimo saem dela, nunca de parametros separados que
+        poderiam dessincronizar do conteudo real."""
+        quantidade = len(ordem)
+        primeiro_hash = ordem[0][0]
+        ultimo_hash, ultimo_rotulo = ordem[-1]
+        hashes = [h for h, _ in ordem]
         self.listas_criadas += 1
         self.offset += quantidade
         self.ultimo_hash = ultimo_hash
@@ -285,16 +382,49 @@ class Progresso:
             "quantidade": quantidade,
             "primeiro_hash": primeiro_hash,
             "ultimo_hash": ultimo_hash,
+            "hashes": hashes,
             "criada_em": datetime.now().isoformat(timespec="seconds"),
         })
+        self.usados.update(hashes)
         self.salvar()
+
+    def guarda_incompleta(self) -> int:
+        """Quantas listas JA CRIADAS nao estao cobertas pela guarda — isto e,
+        quantas nao gravaram a impressao digital (hashes) dos contatos que
+        entraram nelas.
+
+        Arquivos de versao 1 (e entradas antigas de historico) registram
+        `quantidade` mas nao `hashes`: a guarda nao sabe QUEM entrou nessas
+        listas. Enquanto esse numero for > 0, --recomecar-do-A duplicaria
+        exatamente essas pessoas — e basta UMA lista nova (que grava hashes)
+        para `usados` deixar de estar vazio, que era a unica pergunta que a
+        trava antiga fazia (auditoria 2026-09-10, 4a rodada).
+        """
+        com_digital = sum(1 for e in self.historico if e.get("hashes"))
+        return max(0, self.listas_criadas - com_digital)
+
+    def incertos_pendentes(self) -> list:
+        """[(indice_no_historico, entrada), ...] das listas com toques_incertos
+        ainda nao resolvidos pelo operador (ver --resolver-incertos)."""
+        return [(i, e) for i, e in enumerate(self.historico)
+                if e.get("toques_incertos") and not e.get("incertos_resolvidos")]
 
     def resumo(self) -> str:
         if not self.listas_criadas:
-            return "nenhuma lista criada ainda: a proxima comeca do primeiro contato (A)"
-        return (f"{self.listas_criadas} lista(s) criada(s), {self.offset} contato(s) ja "
-                f"incluidos; a proxima lista comeca no contato n. {self.offset + 1} "
-                f"(logo apos {mask(self.ultimo_rotulo)})")
+            base = "nenhuma lista criada ainda: a proxima comeca do primeiro contato (A)"
+        else:
+            base = (f"{self.listas_criadas} lista(s) criada(s), {self.offset} contato(s) ja "
+                    f"incluidos; a proxima lista comeca no contato n. {self.offset + 1} "
+                    f"(logo apos {mask(self.ultimo_rotulo)})")
+        if self.usados:
+            base += f"; a guarda conhece {len(self.usados)} contato(s) ja usados"
+        pendentes = self.incertos_pendentes()
+        if pendentes:
+            listas = ", ".join(str(e.get("lista", "?")) for _, e in pendentes)
+            qtd = sum(len(e.get("toques_incertos") or []) for _, e in pendentes)
+            base += (f"; {qtd} toque(s) em duvida ainda nao resolvidos "
+                     f"(lista(s) {listas})")
+        return base
 
 
 # ---------------------------------------------------------------------------
@@ -314,21 +444,65 @@ class ScrollLivre(IosSpike):
     # comentario prometia ao operador uma checagem que nunca acontecia.
 
     def __init__(self, driver, profile, limite: int = BROADCAST_LIMIT,
-                max_telas: int = MAX_TELAS_POR_LISTA):
+                max_telas: int = MAX_TELAS_POR_LISTA, max_segundos: float = 0.0):
         super().__init__(driver, profile)
         self.verify_selection = False   # contagem por toque; sem varrer a arvore
         self.limite = max(MIN_RECIPIENTS, min(limite, BROADCAST_LIMIT))
         self.max_telas = max(1, int(max_telas))
+        # Orcamento de relogio da lista (0 = desligado, para nao mudar as
+        # construcoes diretas dos testes existentes). Ver _orcamento_estourou.
+        self.max_segundos = max(0.0, float(max_segundos))
+        self._t_inicio_lista: float | None = None
+        # Motivo do PULO (opt-in --pular-celula-ilegivel): posicoes na fila
+        # (nunca hash/nome) de celulas puladas por nao devolverem rotulo/rect.
+        self.pular_sem_rotulo = False
+        self.pulados: list = []
+        # Hashes de contatos com o MESMO NOME de alguem ja tocado NESTA lista:
+        # nao sao tocados (tocar de novo desmarcaria o primeiro) e a perda e
+        # PERMANENTE — a retomada os considera "ja passados". So rastreado
+        # para nao ficar invisivel no log (ver main()).
+        self.homonimos: list = []
         self.tocados: set = set()       # hashes ja tocados NESTA lista
         self.ignorar: set = set()       # hashes ANTES do ponto de retomada (nunca tocar)
         self.ordem: list = []           # (hash, nome) na ordem de toque
+        # GUARDA contra duplicata: hashes de contatos que ja entraram numa
+        # lista CRIADA em rodada(s) anteriores (referencia a prog.usados —
+        # nunca uma copia; ver selecionar()). Nunca escrito por esta classe.
+        self.usados: set = set()
+        # Lista de RECUPERACAO (sem ancora de retomada e com a guarda ja
+        # populada: --recomecar-do-A, ou um progresso v1 sem ultimo_hash).
+        # Definido em selecionar() a partir do proprio Progresso. So nesse
+        # modo um contato ja usado reaparecer no laco principal e ESPERADO:
+        # fora dele, _retomar() ja ignorou tudo ate o ultimo tocado, entao
+        # um hit na guarda so pode ser um HOMONIMO de outra lista (ver o
+        # ramo `c.hash in self.usados` em selecionar()).
+        self.em_recuperacao = False
+        # Hashes de celulas bloqueadas pela guarda DEPOIS do ponto de retomada,
+        # fora da lista de recuperacao: deriva de retomada (ninguem perdido) OU
+        # homonimo de lista anterior (perda permanente) — a tela nao distingue.
+        # Ver o ramo `c.hash in self.usados` em selecionar().
+        self.bloqueados_apos_retomada: list = []
         self.stats = {"telas": 0, "toques": 0, "repetidos": 0, "convites": 0,
                       "sem_rotulo": 0, "cliques_falhos": 0, "telas_retomada": 0,
                       # celula que falhou 2x na MESMA tela: nao e mais abandonada
                       # em silencio (ver selecionar) — vira parada nomeada.
-                      "travados": 0}
+                      "travados": 0,
+                      # bloqueado pela guarda de duplicata (ja entrou numa lista
+                      # anterior): nao e uma celula pulada por engano, e a prova
+                      # de que a guarda esta funcionando (ver _logar_filtrados).
+                      "bloqueados_guarda": 0,
+                      # linha com a altura de uma celula de contato que nao
+                      # devolveu nome/posicao em duas leituras (para a lista
+                      # antes de ultrapassar, ver PARADA_SEM_ROTULO/_SEM_RECT).
+                      "sem_rotulo_ignorado": 0, "sem_rect": 0}
         self._tamanho = None
         self._topo = 0.0
+        # y a partir do qual a leitura CORRENTE nao pode ser confiada (uma
+        # celula com altura de linha de contato nao devolveu nome ou posicao
+        # legivel): redefinido em TODA chamada de _ler_celulas. None = nada a
+        # cortar nesta leitura.
+        self._corte_y: float | None = None
+        self._corte_motivo: str = ""
         self._profundidade = None
         self._profundidade_reescalada = False   # 1 re-escalada por lista (orcamento de tempo)
         self._ultima_leitura_bruta = 0   # celulas que a BUSCA achou na ultima leitura
@@ -378,6 +552,16 @@ class ScrollLivre(IosSpike):
         Clamp de 0.1 a 1.5s (a base em spike_ios usa 0.3–2.0s para fluxos de
         navegacao que dependem de animacoes longas do WhatsApp)."""
         time.sleep(min(max(timeout, 0.1), 1.5))
+
+    def _orcamento_estourou(self) -> bool:
+        """True quando o orcamento de relogio da lista (--max-minutos) acabou.
+        0 (desligado) ou lista ainda nao iniciada (_t_inicio_lista == 0)
+        nunca estoura. Usa o `time` do MODULO (nao time.monotonic importado
+        direto) de proposito: com_relogio() nos testes troca rs.time por um
+        relogio falso."""
+        if not self.max_segundos or self._t_inicio_lista is None:
+            return False
+        return (time.monotonic() - self._t_inicio_lista) >= self.max_segundos
 
     # ---------- leitura da tela ----------
 
@@ -538,6 +722,11 @@ class ScrollLivre(IosSpike):
     def _ler_celulas_impl(self, margem: float) -> list:
         self._fixar_profundidade()
         _, altura = self._tamanho_tela()
+        self._corte_y = None   # propriedade da leitura CORRENTE (ver atributo)
+        self._corte_motivo = ""
+        lidas: list = []
+        ilegiveis: list = []      # (y, h): rect ok, rotulo vazio
+        sem_posicao: list = []    # ultimo y OK antes de um elemento sem rect
         for tentativa in range(2):
             rapido = self._celulas_em_uma_requisicao()
             if rapido is not None:
@@ -555,13 +744,21 @@ class ScrollLivre(IosSpike):
             # re-escalada de profundidade rodava as cegas.
             self._ultima_leitura_bruta = len(els)
             out, falhou = [], False
+            lidas, ilegiveis, sem_posicao = [], [], []
+            ultimo_y_ok = None
             for el, r in zip(els, rects):
                 if r is None:
                     falhou = True
                     if tentativa == 0:
                         break
+                    # 2a leitura ainda sem posicao: nao descarta em silencio
+                    # (ver o discriminador de altura, abaixo) — a ultima
+                    # posicao boa CONHECIDA e o melhor y disponivel para o
+                    # corte, ja que este elemento nao tem posicao nenhuma.
+                    sem_posicao.append(ultimo_y_ok)
                     continue
                 x, y, w, h = r
+                ultimo_y_ok = y
                 if h < ALTURA_MINIMA_CELULA or y < self._topo or y + h > altura - margem:
                     continue
                 # Rotulo: veio na propria resposta da busca (0 chamadas) ou,
@@ -579,14 +776,38 @@ class ScrollLivre(IosSpike):
                     falhou = True
                     if tentativa == 0:
                         break
-                    self.stats["sem_rotulo"] += 1
+                    # 2a leitura ainda sem rotulo: nao conta como sem_rotulo
+                    # de cara — o discriminador de altura (abaixo) decide se
+                    # e uma linha de CONTATO (para a lista) ou um cabecalho
+                    # de secao / decoracao (ignora e segue).
+                    ilegiveis.append((y, h))
                     continue
                 out.append(Celula(el=el, nome=nome, hash=hash_nome(nome), y=y, h=h,
                                   x=x, w=w))
+                lidas.append((y, h))
             if not falhou or tentativa == 1:
                 break
             self.settle(0.2)   # retry rapido: a tela ja estava montada
         out.sort(key=lambda c: c.y)
+        if ilegiveis or sem_posicao:
+            alturas = Counter(round(h, 1) for _, h in lidas)
+            h_modal = alturas.most_common(1)[0][0] if alturas else None
+            for y, h in ilegiveis:
+                if h_modal is None or abs(h - h_modal) <= TOLERANCIA_ALTURA_LINHA:
+                    # tem a altura da LINHA DE CONTATO: e um contato que nao
+                    # disse o nome — nao pode ser ultrapassado em silencio.
+                    self.stats["sem_rotulo"] += 1
+                    if self._corte_y is None or y < self._corte_y:
+                        self._corte_y, self._corte_motivo = y, PARADA_SEM_ROTULO
+                else:
+                    # altura diferente: cabecalho de secao ("A", "B"),
+                    # separador, decoracao. Nao e contato, nao para a lista.
+                    self.stats["sem_rotulo_ignorado"] += 1
+            for ultimo_y in sem_posicao:
+                self.stats["sem_rect"] += 1
+                c = 0.0 if ultimo_y is None else ultimo_y + 0.5
+                if self._corte_y is None or c < self._corte_y:
+                    self._corte_y, self._corte_motivo = c, PARADA_SEM_RECT
         # A BUSCA nao achou celula nenhuma? Pode ser a profundidade, e nao o
         # fim da agenda: a faixa de chips afunda a arvore um nivel depois do
         # 1o contato (CONFIRMADO no modo CSV). Reavaliar AQUI, e nao la no
@@ -727,6 +948,12 @@ class ScrollLivre(IosSpike):
         voltou = False
         anteriores = set()
         for tela in range(MAX_TELAS_RETOMADA):
+            if self._orcamento_estourou():
+                self.parada = "orcamento de tempo da lista (durante a retomada)"
+                raise UiChanged(
+                    "o tempo maximo desta lista acabou ANTES de achar o ponto de "
+                    "retomada; nada foi tocado e o progresso nao mudou — aumente "
+                    "--max-minutos ou rode de novo")
             self.stats["telas_retomada"] += 1
             if not cels:
                 if self.in_picker():
@@ -767,12 +994,24 @@ class ScrollLivre(IosSpike):
                 self.ignorar.update(c.hash for c in cels if chave_ordem(c.nome) <= alvo_chave)
                 return [c for c in cels if chave_ordem(c.nome) > alvo_chave]
             cels = self._ler_celulas()
-        raise UiChanged("nao encontrei o ponto de retomada. Use --reset-progresso para "
-                        "recomecar do A, ou apague o progress.scroll.local.json")
+        raise UiChanged(
+            "nao encontrei o ponto de retomada. Use --recomecar-do-A para recomecar "
+            "do primeiro contato SEM duplicar quem ja esta em lista (a guarda "
+            "continua valendo); --reset-progresso tambem recomeca do A mas apaga "
+            "essa memoria e duplicaria todo mundo ja incluido")
 
     # ---------- selecao ----------
 
     def _tocar(self, c: Celula) -> bool:
+        if c.hash in self.usados:
+            # Trava DURA, independente de qualquer `continue` do laco de
+            # selecao: nunca deve ser alcancavel (o laco em selecionar() ja
+            # bloqueia antes de chegar aqui), mas se algum dia um caminho
+            # novo chamar _tocar diretamente, falhar alto e melhor do que
+            # duplicar em silencio (mesmo raciocinio de _checar_app_em_frente).
+            raise UiChanged(
+                "guarda de duplicata: tentativa de tocar um contato que ja "
+                "entrou em lista anterior — parei antes do toque")
         try:
             c.el.click()
         except WebDriverException as e:
@@ -821,6 +1060,15 @@ class ScrollLivre(IosSpike):
         ANTES desta rajada."""
         if not lote:
             return [], []
+        repetidos = [c for c in lote if c.hash in self.usados]
+        if repetidos:
+            # Mesma trava de _tocar, para o lote inteiro: nunca deveria ser
+            # alcancavel (o laco de selecao ja filtra antes de montar o lote),
+            # mas falhar alto aqui e melhor do que arriscar tocar de novo em
+            # alguem que ja esta numa lista anterior (o que o DESMARCARIA).
+            raise UiChanged(
+                f"guarda de duplicata: {len(repetidos)} contato(s) do lote ja "
+                "entraram em lista anterior — parei antes de tocar")
         acoes = []
         for c in lote:
             x, y = c.centro
@@ -1004,9 +1252,19 @@ class ScrollLivre(IosSpike):
     def selecionar(self, prog: Progresso) -> int:
         """Seleciona ate self.limite contatos a partir do ponto de retomada.
         Devolve quantos foram tocados."""
+        self._t_inicio_lista = time.monotonic()   # cobre TAMBEM a retomada (ver _retomar)
         self.transition(State.SELECTING)
         self.tocados, self.ignorar, self.ordem, self.results = set(), set(), [], []
+        # REFERENCIA, nao copia: se esta rodada criar varias listas, a lista
+        # K+1 ja enxerga os hashes que registrar_lista() acabou de acrescentar
+        # a prog.usados ao registrar a lista K. Esta classe nunca escreve
+        # neste conjunto (so o le) — ver _tocar/_tocar_lote para a trava dura.
+        self.usados = prog.usados
+        # Ver o atributo em __init__: define se um hit na guarda dentro do laco
+        # principal e re-observacao esperada (recuperacao) ou homonimo.
+        self.em_recuperacao = bool(prog.usados) and not prog.ultimo_hash
         convites_vistos = set()
+        self.bloqueados_apos_retomada = []
         self._topo = 0.0
         cels = self._ler_celulas()
         if not cels:
@@ -1019,6 +1277,27 @@ class ScrollLivre(IosSpike):
         anteriores = set()
         t0 = time.monotonic()
         for tela in range(self.max_telas):
+            if self._orcamento_estourou():
+                self.parada = "orcamento de tempo da lista"
+                if self.ordem:
+                    log.warning("o tempo maximo desta lista (%.0f min) acabou depois "
+                                "de %d tela(s) sem terminar a lista nem esgotar a "
+                                "agenda — parando com %d contato(s) confirmado(s); a "
+                                "proxima rodada continua do seguinte",
+                                self.max_segundos / 60, self.stats["telas"],
+                                len(self.ordem))
+                else:
+                    # Sem NENHUM toque nao existe "seguinte": o ponto de retomada
+                    # nao mudou e a proxima rodada, identica, faz o mesmo. Dizer
+                    # "continua do seguinte" aqui mandava o operador esperar um
+                    # avanco que nao aconteceu (auditoria 2026-09-10, 4a rodada).
+                    log.warning("o tempo maximo desta lista (%.0f min) acabou depois "
+                                "de %d tela(s) SEM tocar em ninguem: o progresso NAO "
+                                "avancou e a proxima rodada vai comecar exatamente no "
+                                "mesmo ponto. Suba o tempo maximo por lista, ou use "
+                                "--reset-progresso se aceitar recomecar do zero.",
+                                self.max_segundos / 60, self.stats["telas"])
+                break
             self.stats["telas"] += 1
             novos = 0
             tocados_tela = {}       # hash -> y da celula tocada NESTA tela
@@ -1051,6 +1330,67 @@ class ScrollLivre(IosSpike):
                 i += 1
                 if c.hash in self.ignorar:
                     continue                     # antes do ponto de retomada
+                if self._corte_y is not None and c.y >= self._corte_y:
+                    if self.pular_sem_rotulo:
+                        self.stats["sem_rotulo_pulado"] = self.stats.get(
+                            "sem_rotulo_pulado", 0) + 1
+                        self.pulados.append(len(self.ordem))   # posicao na fila,
+                                                                # NUNCA nome/hash
+                        log.warning("--pular-celula-ilegivel: pulando uma celula "
+                                    "que nao devolve nome/posicao, por decisao do "
+                                    "operador. Essa pessoa NAO entra em lista "
+                                    "nenhuma nesta rodada nem nas seguintes.")
+                        self._corte_y = None      # segue a tela; a proxima leitura recalcula
+                        # SEM continue: a celula ilegivel nunca entrou em `cels`
+                        # (nao existe Celula para ela) — a celula ATUAL (c) e
+                        # uma celula BOA que so caiu depois do corte por
+                        # posicao; ela segue para as checagens seguintes.
+                    else:
+                        self.parada = self._corte_motivo or PARADA_SEM_ROTULO
+                        log.error("uma celula com a altura de uma linha de contato "
+                                  "voltou SEM ROTULO OU SEM POSICAO em duas leituras. "
+                                  "Nao da para saber quem e — e tocar nas seguintes "
+                                  "deixaria essa pessoa atras do ponto de retomada, "
+                                  "fora de qualquer lista. PARANDO com %d confirmado(s); "
+                                  "ela e a proxima da fila na rodada seguinte. Se a "
+                                  "rodada seguinte parar no MESMO ponto (mesmo "
+                                  "'proximo_contato_n' no progresso), nao e lentidao: "
+                                  "e essa linha da agenda que nunca devolve nome — "
+                                  "veja --pular-celula-ilegivel.", len(self.ordem))
+                        self._logar_filtrados()
+                        return len(self.ordem)
+                if c.hash in self.usados:
+                    # GUARDA: este contato ja entrou numa lista CRIADA em
+                    # rodada(s) anteriores (prog.usados). Nunca e tocado — a
+                    # trava e a mesma nos dois ramos abaixo; o que muda e o
+                    # MOTIVO relatado ao operador. Fica antes do filtro de DDD
+                    # de proposito: nenhum dos dois numeros mede o filtro.
+                    self.stats["bloqueados_guarda"] += 1
+                    if not self.em_recuperacao:
+                        # DUAS CAUSAS POSSIVEIS, e a tela nao permite distinguir
+                        # (auditoria 2026-09-10, 4a rodada — a hipotese de
+                        # separar por ordem alfabetica foi TESTADA e REFUTADA:
+                        # um homonimo cross-lista carrega a chave alfabetica do
+                        # original, que e sempre <= a ancora, e a deriva de
+                        # retomada devolve gente com chave > ancora — os dois
+                        # casos caem em lados OPOSTOS do que o criterio previa):
+                        #
+                        #  (a) DERIVA DE RETOMADA — a mesma pessoa reaparecendo
+                        #      porque a ancora parou cedo demais. Ninguem perde
+                        #      nada: a guarda so evita a duplicata.
+                        #  (b) HOMONIMO CROSS-LISTA — OUTRA pessoa com o mesmo
+                        #      nome de alguem de uma lista anterior. Ela nao
+                        #      pode ser tocada (tocar desmarcaria a primeira, e
+                        #      nao da para distinguir as duas) e a perda e
+                        #      PERMANENTE: a proxima ancora passa por cima dela.
+                        #
+                        # O caso (b) nao tinha NENHUM registro — nem no
+                        # historico, nem no log — e o unico numero visivel
+                        # mandava o operador investigar "retomada imprecisa",
+                        # o diagnostico errado. Agora os hashes ficam gravados
+                        # e o aviso nomeia as duas causas.
+                        self.bloqueados_apos_retomada.append(c.hash)
+                    continue
                 if self.permitidos is not None and c.hash not in self.permitidos:
                     if c.hash not in self._filtrados_vistos:
                         self._filtrados_vistos.add(c.hash)
@@ -1064,6 +1404,12 @@ class ScrollLivre(IosSpike):
                     mesma = y_tocada is not None and abs(c.y - y_tocada) < c.h * 0.6
                     if c.hash not in anteriores and not mesma:
                         self.stats["repetidos"] += 1
+                        # Perda PERMANENTE (nao so desta tela): este contato
+                        # tem o MESMO NOME de alguem ja tocado e nao entra em
+                        # lista nenhuma, nesta rodada nem nas seguintes (a
+                        # retomada o considera "ja passado"). So rastreado —
+                        # nunca deixado de fora em silencio (ver main()).
+                        self.homonimos.append(c.hash)
                     continue
                 if falhas.get(c.hash, 0) >= 2:
                     # DIVIDA (B), fechada em 2026-09-10 (3a rodada): aqui havia
@@ -1159,8 +1505,28 @@ class ScrollLivre(IosSpike):
                     for c in self._ler_celulas(margem=0):
                         if len(self.ordem) >= self.limite:
                             break
-                        if c.hash in self.ignorar or c.hash in self.tocados:
+                        if c.hash in self.ignorar or c.hash in self.tocados or c.hash in self.usados:
+                            if c.hash in self.usados and c.hash not in self.ignorar and c.hash not in self.tocados:
+                                self.stats["bloqueados_guarda"] += 1
                             continue
+                        if self._corte_y is not None and c.y >= self._corte_y:
+                            if self.pular_sem_rotulo:
+                                self.stats["sem_rotulo_pulado"] = self.stats.get(
+                                    "sem_rotulo_pulado", 0) + 1
+                                self.pulados.append(len(self.ordem))
+                                log.warning("--pular-celula-ilegivel: pulando uma "
+                                            "celula que nao devolve nome/posicao "
+                                            "na ultima passada.")
+                                self._corte_y = None
+                                # SEM continue (ver o mesmo raciocinio no laco
+                                # principal): a celula ATUAL e boa.
+                            else:
+                                self.parada = self._corte_motivo or PARADA_SEM_ROTULO
+                                log.error("uma celula ilegivel (sem rotulo/posicao) na "
+                                          "ultima passada; parando com %d confirmado(s) "
+                                          "para nao deixa-la para tras", len(self.ordem))
+                                self._logar_filtrados()
+                                return len(self.ordem)
                         if self.permitidos is not None and c.hash not in self.permitidos:
                             continue
                         if eh_convite(c.nome):
@@ -1273,6 +1639,43 @@ class ScrollLivre(IosSpike):
             log.info("filtro de DDD: %d contato(s) descartado(s) por nao casarem "
                      "nesta lista (telas percorridas: %d)",
                      self.stats["filtrados"], self.stats["telas"])
+        if self.stats.get("bloqueados_guarda"):
+            if self.em_recuperacao:
+                log.info("guarda: %d celula(s) ja em lista anterior foram "
+                         "atravessadas sem toque nesta lista de recuperacao — era "
+                         "exatamente o trabalho dela antes de chegar em gente nova",
+                         self.stats["bloqueados_guarda"])
+            else:
+                log.warning("guarda: %d celula(s) nao foram tocadas porque o contato "
+                            "ja entrou numa lista anterior (ninguem foi duplicado)",
+                            self.stats["bloqueados_guarda"])
+        if self.bloqueados_apos_retomada:
+            # Duas causas, e a tela nao distingue (ver selecionar). Nomear as
+            # duas e o unico jeito honesto: dizer so "deriva de retomada"
+            # mandava o operador para o problema errado quando a causa era a
+            # segunda, e a segunda e uma PERDA.
+            # ATENCAO ao texto: a GUI casa frases por SUBSTRING (gui_state.
+            # etapa_humana). Escrever "ponto de retomada" aqui fazia a tela
+            # exibir "Ponto de retomada encontrado." — uma frase de sucesso —
+            # em cima de um aviso de possivel PERDA. Por isso "depois da
+            # retomada", nunca "depois do ponto de retomada".
+            log.warning("%d celula(s) apareceram depois da retomada com o "
+                        "contato ja em lista anterior. Ou a retomada parou cedo e a "
+                        "tela reofereceu as MESMAS pessoas (nada perdido), ou sao "
+                        "pessoas DIFERENTES com o mesmo nome de alguem ja incluido "
+                        "— e essas nao entram em lista nenhuma, nesta rodada nem "
+                        "nas seguintes. Nao da para distinguir pela tela: se faltar "
+                        "gente no fim da agenda, e por aqui que se procura (os "
+                        "codigos ficam no progresso, em bloqueados_apos_retomada).",
+                        len(set(self.bloqueados_apos_retomada)))
+        if self.homonimos:
+            log.warning("%d contato(s) com o MESMO NOME de alguem que ja entrou "
+                        "nesta lista ou numa lista anterior nao foram tocados "
+                        "(tocar de novo DESMARCARIA o primeiro, e nao ha como "
+                        "distinguir os dois pela tela). Eles nao entram em lista "
+                        "nenhuma desta rodada nem das seguintes — se a agenda tem "
+                        "nomes repetidos de verdade, esses precisam ser adicionados "
+                        "a mao.", len(set(self.homonimos)))
 
     # ---------- saida ----------
 
@@ -1329,8 +1732,32 @@ def _encerrar_com_seguranca(*_):
     raise KeyboardInterrupt
 
 
-def main() -> int:
-    signal.signal(signal.SIGTERM, _encerrar_com_seguranca)
+def _avisar_incertos_pendentes(prog: Progresso) -> None:
+    """Toques em duvida (rajada turbo nao confirmada) que ainda nao foram
+    resolvidos pelo operador: aviso repetido a CADA rodada ate serem
+    resolvidos — uma decisao humana que nao pode se perder entre rodadas."""
+    pendentes = prog.incertos_pendentes()
+    if not pendentes:
+        return
+    for _, entrada in pendentes:
+        n = len(entrada.get("toques_incertos") or [])
+        lista = entrada.get("lista", "?")
+        log.warning(
+            "%d toque(s) em duvida na lista %s ainda nao resolvidos: esses "
+            "contatos podem estar na lista %s do iPhone SEM estarem no "
+            "progresso; eles NAO estao bloqueados, entao podem entrar de novo "
+            "na proxima lista. Confira o numero de destinatarios da lista %s "
+            "no iPhone e rode --resolver-incertos entraram (bloqueia: nunca "
+            "mais tocados) ou --resolver-incertos nao-entraram (mantem na "
+            "fila)", n, lista, lista, lista)
+
+
+def construir_parser() -> argparse.ArgumentParser:
+    """O parser vive numa funcao propria para que o TESTE possa perguntar a ele
+    o default de verdade de cada opcao (parser.get_default(...)), em vez de
+    comparar duas constantes que podem nao ser lidas por codigo nenhum — que
+    foi exatamente o caso de ORCAMENTO_PADRAO_S ate 2026-09-10 (4a rodada):
+    trocar `--max-minutos` de 60 para 5 ou 999 deixava as 10 suites verdes."""
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--server", default="http://127.0.0.1:4723")
@@ -1347,7 +1774,24 @@ def main() -> int:
     ap.add_argument("--progress-file", default=PROGRESSO_PADRAO)
     ap.add_argument("--progresso", action="store_true", help="so mostra onde parou e sai")
     ap.add_argument("--reset-progresso", action="store_true",
-                    help="apaga o progresso: a proxima lista recomeca do primeiro contato")
+                    help="APAGA TUDO, inclusive a memoria de quem ja entrou em lista "
+                         "(a guarda): a proxima lista recomeca do primeiro contato E "
+                         "duplicaria todo mundo ja incluido. Normalmente voce quer "
+                         "--recomecar-do-A, nao isto")
+    ap.add_argument("--recomecar-do-A", action="store_true",
+                    help="a proxima lista recomeca do primeiro contato (A) sem tentar "
+                         "retomada posicional, MAS preserva a guarda: ninguem que ja "
+                         "esta numa lista anterior e re-tocado. Use quando a retomada "
+                         "normal nao encontra o ponto (ver a mensagem de erro)")
+    ap.add_argument("--resolver-incertos", choices=("entraram", "nao-entraram"), default="",
+                    help="resolve toque(s) em duvida (rajada turbo nao confirmada): "
+                         "'entraram' bloqueia esses hashes na guarda (nunca mais "
+                         "tocados); 'nao-entraram' descarta a duvida e os deixa na "
+                         "fila. Confira o numero de destinatarios no iPhone antes "
+                         "de decidir")
+    ap.add_argument("--lista", type=int, default=0,
+                    help="com --resolver-incertos: resolve so esta lista (numero do "
+                         "historico); sem isto, resolve todas as pendentes")
     ap.add_argument("--ddd", default="",
                     help="incluir so estes DDDs (ex.: 21,22). Exige --agenda: a tela "
                          "nao mostra o numero de contato salvo, o DDD vem da agenda")
@@ -1357,8 +1801,22 @@ def main() -> int:
     ap.add_argument("--turbo", action="store_true",
                     help="toca todas as celulas de cada tela numa unica requisicao "
                          "(rajada W3C). Ligue SO depois do teste de 5 contatos passar")
+    ap.add_argument("--max-minutos", type=float, default=ORCAMENTO_PADRAO_S / 60,
+                    help="tempo maximo de UMA lista, em minutos (0 = sem limite). "
+                         "Estourou: para com salvamento parcial, igual ao teto de "
+                         f"telas (padrao {ORCAMENTO_PADRAO_S / 60:.0f})")
+    ap.add_argument("--pular-celula-ilegivel", action="store_true",
+                    help="PULA (em vez de parar) uma celula que nao devolve nome nem "
+                         "posicao legivel. Ela NAO entra em lista nenhuma e fica "
+                         "registrada no progresso. Use so quando a rodada travar "
+                         "duas vezes no mesmo ponto")
     ap.add_argument("-v", "--verbose", action="store_true")
-    args = ap.parse_args()
+    return ap
+
+
+def main() -> int:
+    signal.signal(signal.SIGTERM, _encerrar_com_seguranca)
+    args = construir_parser().parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(levelname)s %(message)s")
@@ -1369,8 +1827,67 @@ def main() -> int:
             os.remove(args.progress_file)
         print("progresso apagado: a proxima lista comeca do primeiro contato.")
         return 0
+    if args.recomecar_do_A:
+        # A pergunta certa nao e "a guarda esta VAZIA?", e "a guarda cobre TODAS
+        # as listas ja criadas?". Ate 2026-09-10 (4a rodada) era a primeira:
+        # num progresso v1 com 1 lista antiga, bastava criar UMA lista nova
+        # (que grava hashes) para `usados` deixar de estar vazio e a trava
+        # liberar — e a lista seguinte comecava no A e re-tocava, inteira, a
+        # lista antiga que a guarda nao conhece.
+        faltando = prog.guarda_incompleta()
+        if faltando:
+            log.error("a guarda nao sabe QUEM entrou em %d de %d lista(s) ja "
+                      "criada(s) (arquivo de versao 1, ou entradas de historico "
+                      "sem a impressao digital dos contatos): recomecar do A "
+                      "re-tocaria exatamente essas pessoas, que entrariam numa "
+                      "SEGUNDA lista de transmissao. Use --reset-progresso so se "
+                      "voce aceitar essa duplicacao.", faltando, prog.listas_criadas)
+            return 2
+        prog.ultimo_hash = ""
+        prog.ultimo_rotulo = ""
+        prog.historico.append({"evento": "recomecar-do-A",
+                               "em": datetime.now().isoformat(timespec="seconds")})
+        prog.salvar()
+        print(f"progresso mantido ({len(prog.usados)} contato(s) na guarda); a "
+              "proxima lista recomeca do primeiro contato (A) SEM retomada "
+              "posicional — a guarda impede que quem ja esta em lista seja "
+              "tocado de novo.")
+        return 0
     if args.progresso:
         print(prog.resumo())
+        _avisar_incertos_pendentes(prog)
+        return 0
+
+    if args.resolver_incertos:
+        pendentes = prog.incertos_pendentes()
+        if args.lista:
+            pendentes = [(i, e) for i, e in pendentes if e.get("lista") == args.lista]
+            if not pendentes:
+                log.error("nenhuma pendencia de toques incertos na lista %d", args.lista)
+                return 2
+        if not pendentes:
+            print("nenhum toque em duvida pendente.")
+            return 0
+        agora = datetime.now().isoformat(timespec="seconds")
+        for _, entrada in pendentes:
+            if args.resolver_incertos == "entraram":
+                hashes = list(entrada.get("toques_incertos") or [])
+                ja_tinha = entrada.get("hashes") or []
+                # Idempotencia: resolver duas vezes nao pode contar duas vezes.
+                novos = [h for h in dict.fromkeys(hashes) if h not in ja_tinha]
+                entrada["hashes"] = list(dict.fromkeys(list(ja_tinha) + hashes))
+                prog.usados.update(hashes)
+                # A lista do iPhone tem esses destinatarios a mais: se o
+                # contador de contatos incluidos nao subir junto, o resumo
+                # passa a relatar MENOS gente do que ha de verdade, para
+                # sempre (a retomada usa ultimo_hash, mas o operador le isto).
+                entrada["quantidade"] = len(entrada["hashes"])
+                prog.offset += len(novos)
+            entrada["incertos_resolvidos"] = True
+            entrada["incertos_decisao"] = args.resolver_incertos
+            entrada["incertos_resolvidos_em"] = agora
+        prog.salvar()
+        print(f"{len(pendentes)} pendencia(s) resolvida(s) como '{args.resolver_incertos}'.")
         return 0
 
     if args.max_listas < 1:
@@ -1379,6 +1896,12 @@ def main() -> int:
     if args.limite_por_lista < MIN_RECIPIENTS or args.limite_por_lista > BROADCAST_LIMIT:
         log.error("--limite-por-lista deve ficar entre %d e %d", MIN_RECIPIENTS, BROADCAST_LIMIT)
         return 2
+    if args.max_minutos < 0:
+        log.error("--max-minutos nao pode ser negativo (0 desliga o limite)")
+        return 2
+    if 0 < args.max_minutos < 1:
+        log.warning("--max-minutos %.2f e menor que 1 minuto — a lista provavelmente "
+                    "vai parar antes de tocar em qualquer contato", args.max_minutos)
     if not args.approve_create and args.max_listas > 1:
         log.warning("ensaio (sem --approve-create): faco 1 lista so, sem salvar progresso")
         args.max_listas = 1
@@ -1402,6 +1925,7 @@ def main() -> int:
             log.error("nenhum contato da agenda cai nos DDDs %s — nada a fazer", args.ddd)
             return 2
     log.info("progresso: %s", prog.resumo())
+    _avisar_incertos_pendentes(prog)
     log.info("modo: %s | %d lista(s) x ate %d contatos",
              "CRIAR DE VERDADE" if args.approve_create else "ENSAIO (nao cria)",
              args.max_listas, args.limite_por_lista)
@@ -1411,6 +1935,48 @@ def main() -> int:
         log.info("teto de telas elevado para %d nesta lista (filtro de DDD "
                  "restritivo: a taxa de aprovacao na AGENDA e um teto superior "
                  "da taxa real na tela)", max_telas)
+    if not prog.ultimo_hash and prog.usados:
+        # Lista de RECUPERACAO (--recomecar-do-A ou primeira lista de um
+        # progresso ja com contatos usados): sem ancora de retomada, ela rola
+        # a agenda desde o A e precisa passar por TODOS os ja usados (a
+        # guarda bloqueia o toque, mas a tela ainda precisa ser lida e
+        # rolada) antes de achar gente nova.
+        max_telas = max_telas_para_recuperacao(len(prog.usados), max_telas)
+        # As duas travas (teto de TELAS e orcamento de RELOGIO) usam a mesma
+        # calibracao e ate 2026-09-10 (4a rodada) nunca se falavam: o teto
+        # prometia ~125 min de rolagem enquanto o orcamento que a GUI sempre
+        # manda (60 min) cortava em ~1200 telas — antes de a lista chegar em
+        # QUALQUER contato novo. A rodada terminava com 0 toques, nada era
+        # criado, o progresso nao avancava, e a rodada seguinte fazia
+        # exatamente a mesma coisa (livelock). Agora isso e recusado na
+        # largada, com o numero que resolve.
+        travessia = telas_para_atravessar_guarda(len(prog.usados))
+        telas_orcamento = (int(args.max_minutos * 60 / SEGUNDOS_POR_TELA_ESTIMADO)
+                           if args.max_minutos > 0 else 0)
+        if telas_orcamento and telas_orcamento < travessia:
+            minutos_minimos = math.ceil(
+                (travessia + MAX_TELAS_POR_LISTA) * SEGUNDOS_POR_TELA_ESTIMADO / 60)
+            log.error("esta lista de recuperacao nao cabe no tempo maximo: para "
+                      "atravessar os %d contato(s) que ja estao em lista ela precisa "
+                      "de ~%d telas (~%d min a %.0fs/tela), e o tempo maximo de "
+                      "%.0f min so alcanca ~%d telas. Ela gastaria a rodada inteira "
+                      "sem tocar em NINGUEM novo e sem avancar o progresso — a "
+                      "rodada seguinte faria exatamente o mesmo. Suba --max-minutos "
+                      "para pelo menos %d; se voce aceitar duplicar quem ja entrou, "
+                      "--reset-progresso.",
+                      len(prog.usados), travessia,
+                      math.ceil(travessia * SEGUNDOS_POR_TELA_ESTIMADO / 60),
+                      SEGUNDOS_POR_TELA_ESTIMADO, args.max_minutos, telas_orcamento,
+                      minutos_minimos)
+            return 8
+        telas_efetivo = min(max_telas, telas_orcamento) if telas_orcamento else max_telas
+        log.warning("lista de recuperacao (sem retomada posicional): ela vai rolar "
+                    "ate ~%d telas (~%.0f min a %.0fs/tela) porque a guarda ja tem "
+                    "%d contato(s) usados; as primeiras ~%d telas sao so travessia, "
+                    "sem tocar em ninguem. Estourar continua sendo salvamento "
+                    "parcial, nao perda.", telas_efetivo,
+                    telas_efetivo * SEGUNDOS_POR_TELA_ESTIMADO / 60,
+                    SEGUNDOS_POR_TELA_ESTIMADO, len(prog.usados), travessia)
     if args.turbo and args.limite_por_lista > 30:
         log.warning("ATENCAO: --turbo com --limite-por-lista %d e sem nenhum "
                     "contador de selecionados confirmado no aparelho (item em "
@@ -1436,17 +2002,29 @@ def main() -> int:
         for n in range(1, args.max_listas + 1):
             numero_lista = prog.listas_criadas + 1
             print(f"Lista {n} de {args.max_listas}", flush=True)   # a GUI le esta linha
-            sp = ScrollLivre(driver, profile, limite=args.limite_por_lista, max_telas=max_telas)
+            sp = ScrollLivre(driver, profile, limite=args.limite_por_lista, max_telas=max_telas,
+                             max_segundos=args.max_minutos * 60)
             sp.turbo = bool(args.turbo)
             sp.permitidos = filtro["permitidos"] if filtro else None
+            sp.pular_sem_rotulo = bool(args.pular_celula_ilegivel)
             if sp.turbo:
                 log.info("turbo ligado: rajada de toques por tela (1 requisicao)")
             sp.transition(State.PREPARING)
             sp.open_new_broadcast()
             t0 = time.monotonic()
+            falha_infra = False   # o WDA/driver morreu (nao foi regra da estacao)
             try:
                 qtd = sp.selecionar(prog)
             except (UiChanged, WebDriverException) as exc:
+                # ORIGEM da parada. UiChanged e uma regra NOMEADA da estacao
+                # (tom "atencao" na GUI); uma WebDriverException crua e o
+                # WebDriverAgent caindo — "socket hang up", porta 8100 recusada
+                # — e precisa sair como ERRO, com as instrucoes de recuperacao
+                # do WDA. Ate 2026-09-10 (4a rodada) os dois saiam como codigo
+                # 7 ("parou por uma regra da estacao... Nada foi perdido") e a
+                # operadora re-rodava contra um WDA morto.
+                falha_infra = (isinstance(exc, WebDriverException)
+                               and not isinstance(exc, UiChanged))
                 # SALVAMENTO PARCIAL: uma excecao aqui (rajada interrompida,
                 # seletor sumiu) NAO pode custar os toques ja confirmados desta
                 # lista. sp.ordem so contem toques CONFIRMADOS (ver _tocar_lote e
@@ -1462,18 +2040,30 @@ def main() -> int:
             log.info("lista %d: %d contato(s) selecionado(s) em %ds — telas %d, "
                      "retomada %d tela(s), homonimos ignorados %d, convites %d, "
                      "cliques que falharam e foram refeitos %d, sem rotulo %d, "
-                     "travados %d",
+                     "sem posicao legivel %d, travados %d",
                      numero_lista, qtd, dur, sp.stats["telas"], sp.stats["telas_retomada"],
                      sp.stats["repetidos"], sp.stats["convites"], sp.stats["cliques_falhos"],
-                     sp.stats["sem_rotulo"], sp.stats["travados"])
+                     sp.stats["sem_rotulo"], sp.stats.get("sem_rect", 0), sp.stats["travados"])
             if sp.stats["sem_rotulo"]:
                 # stats['sem_rotulo'] era escrito e NUNCA lido, apesar de a tabela
                 # de diagnostico do MODO-SCROLL-LIVRE.md mandar o operador
                 # procurar este numero no resumo (auditoria 2026-09-10, 3a rodada).
-                log.warning("%d celula(s) voltaram SEM ROTULO em duas leituras e "
-                            "foram descartadas: elas podem ter ficado de fora desta "
-                            "lista. Se faltar alguem, e por aqui que se comeca a "
-                            "procurar.", sp.stats["sem_rotulo"])
+                # A partir da mudanca do discriminador de altura, uma celula SEM
+                # ROTULO com a altura de uma linha de contato PARA a lista (ver
+                # PARADA_SEM_ROTULO) em vez de ser so descartada.
+                log.warning("%d celula(s) voltaram SEM ROTULO em duas leituras: "
+                            "elas podem ter ficado de fora desta lista, ou terem "
+                            "parado a selecao (ver o motivo da parada, se houver). "
+                            "Se faltar alguem, e por aqui que se comeca a procurar.",
+                            sp.stats["sem_rotulo"])
+            if sp.stats.get("sem_rotulo_ignorado"):
+                log.info("%d linha(s) sem rotulo com altura diferente da linha de "
+                         "contato (cabecalho de secao?) — ignoradas, a lista seguiu",
+                         sp.stats["sem_rotulo_ignorado"])
+            if sp.stats.get("sem_rect"):
+                log.warning("%d celula(s) sem posicao legivel (o rect nao "
+                            "respondeu) — quase sempre um elemento que ficou "
+                            "obsoleto porque a lista se moveu.", sp.stats["sem_rect"])
 
             if sp.parada:
                 log.warning("selecao desta lista foi interrompida: %s", sp.parada)
@@ -1497,10 +2087,28 @@ def main() -> int:
                                   "nao ha como confirmar a criacao da lista parcial")
                 if criada_parcial:
                     criadas += 1
-                    prog.registrar_lista(qtd, sp.ordem[0][0], sp.ordem[-1][0],
-                                         sp.ordem[-1][1])
+                    prog.registrar_lista(sp.ordem)
                     prog.historico[-1]["parcial"] = True
                     prog.historico[-1]["motivo_da_parada"] = sp.parada
+                    if sp.homonimos:
+                        prog.historico[-1]["homonimos_ignorados"] = list(dict.fromkeys(sp.homonimos))
+                        prog.historico[-1]["homonimos_aviso"] = (
+                            "contato(s) com o mesmo nome de alguem ja tocado nao "
+                            "entraram em lista nenhuma (perda permanente)")
+                    if sp.bloqueados_apos_retomada:
+                        prog.historico[-1]["bloqueados_apos_retomada"] = list(
+                            dict.fromkeys(sp.bloqueados_apos_retomada))
+                        prog.historico[-1]["bloqueados_apos_retomada_aviso"] = (
+                            "celulas ja em lista anterior que apareceram depois do "
+                            "ponto de retomada: ou a retomada parou cedo (nada "
+                            "perdido) ou sao pessoas diferentes com o mesmo nome de "
+                            "alguem ja incluido (essas nao entram em lista nenhuma)")
+                    if sp.pulados:
+                        prog.historico[-1]["celulas_sem_rotulo_puladas"] = list(sp.pulados)
+                        prog.historico[-1]["aviso"] = (
+                            f"{len(sp.pulados)} pessoa(s) nao entraram em lista "
+                            "nenhuma: a celula nao devolvia nome/posicao e o "
+                            "operador autorizou pular")
                     if sp.incerteza:
                         # Janela de incerteza: hashes tocados numa rajada que nao
                         # pode ser confirmada nem re-tocada (nunca nomes/numeros).
@@ -1509,6 +2117,13 @@ def main() -> int:
                             f"a lista pode ter ate {len(sp.incerteza)} destinatario(s) "
                             "a mais do que o progresso registra; esses contatos podem "
                             "reaparecer na proxima lista")
+                        # Ficam FORA da guarda por padrao (nunca em prog.usados):
+                        # o risco aceito e DUPLICAR, nunca PULAR. So entram na
+                        # guarda quando o operador confirmar com --resolver-incertos
+                        # entraram (ver _avisar_incertos_pendentes / a decisao no
+                        # topo de main()).
+                        prog.historico[-1]["incertos_resolvidos"] = False
+                        prog.historico[-1]["incertos_decisao"] = None
                     prog.salvar()
                     log.warning("lista %d criada PARCIAL: %d de ate %d contato(s) "
                                 "pedidos (motivo da parada: %s). %s", numero_lista,
@@ -1535,16 +2150,50 @@ def main() -> int:
                     # na mao antes da proxima escada (5 -> 30 -> 256).
                     log.info("ENSAIO interrompido (%s) com %d selecionado(s); "
                              "cancelando o seletor sem criar nada.", sp.parada, qtd)
+                    if falha_infra:
+                        log.error("o motivo foi uma falha do WebDriverAgent, nao uma "
+                                  "regra da estacao — confira o iPhone antes da "
+                                  "proxima rodada.")
                     try:
                         sp.cancelar_seletor()
                     except (UiChanged, WebDriverException) as exc3:
                         log.warning("nao consegui cancelar o seletor (%s): cancele "
                                     "na mao no iPhone antes da proxima rodada", exc3)
-                    raise UiChanged(sp.parada)
-                log.error("selecao interrompida e nao deu para salvar nada: %d "
-                         "toque(s) confirmado(s) ficam de fora, progresso NAO "
-                         "avancou (motivo: %s)", qtd, sp.parada)
-                raise UiChanged(sp.parada)
+                    print(json.dumps({
+                        "listas_criadas_nesta_rodada": criadas, "offset": prog.offset,
+                        "proximo_contato_n": prog.offset + 1,
+                        "listas_criadas_total": prog.listas_criadas,
+                        "parcial": False, "motivo_da_parada": sp.parada,
+                    }, ensure_ascii=False, indent=2))
+                    if falha_infra:
+                        # ENSAIO tambem: o motivo foi o driver, nao uma regra.
+                        _dump_inventory_on_fail(driver, "inventory-erro.json")
+                        return 4
+                    return 7
+                if falha_infra:
+                    log.error("a selecao parou porque o WebDriverAgent falhou (%s): "
+                              "%d toque(s) confirmado(s) ficam de fora e o progresso "
+                              "NAO avancou. Isto NAO e uma regra da estacao — "
+                              "confira o iPhone antes de rodar de novo.",
+                              sp.parada, qtd)
+                    _dump_inventory_on_fail(driver, "inventory-erro.json")
+                    print(json.dumps({
+                        "listas_criadas_nesta_rodada": criadas, "offset": prog.offset,
+                        "proximo_contato_n": prog.offset + 1,
+                        "listas_criadas_total": prog.listas_criadas,
+                        "parcial": False, "motivo_da_parada": sp.parada,
+                    }, ensure_ascii=False, indent=2))
+                    return 4
+                log.error("selecao interrompida por uma regra da estacao e nao deu "
+                         "para salvar nada: %d toque(s) confirmado(s) ficam de fora, "
+                         "progresso NAO avancou (motivo: %s)", qtd, sp.parada)
+                print(json.dumps({
+                    "listas_criadas_nesta_rodada": criadas, "offset": prog.offset,
+                    "proximo_contato_n": prog.offset + 1,
+                    "listas_criadas_total": prog.listas_criadas,
+                    "parcial": False, "motivo_da_parada": sp.parada,
+                }, ensure_ascii=False, indent=2))
+                return 7
 
             if qtd < MIN_RECIPIENTS:
                 log.info("menos de %d contatos restantes: nao ha lista a criar (fim da agenda)",
@@ -1560,7 +2209,28 @@ def main() -> int:
 
             sp.finish(approve_create=True)     # so clica se "Criar" estiver habilitado
             criadas += 1
-            prog.registrar_lista(qtd, sp.ordem[0][0], sp.ordem[-1][0], sp.ordem[-1][1])
+            prog.registrar_lista(sp.ordem)
+            if sp.homonimos:
+                prog.historico[-1]["homonimos_ignorados"] = list(dict.fromkeys(sp.homonimos))
+                prog.historico[-1]["homonimos_aviso"] = (
+                    "contato(s) com o mesmo nome de alguem ja tocado nao entraram "
+                    "em lista nenhuma (perda permanente)")
+                prog.salvar()
+            if sp.bloqueados_apos_retomada:
+                prog.historico[-1]["bloqueados_apos_retomada"] = list(
+                    dict.fromkeys(sp.bloqueados_apos_retomada))
+                prog.historico[-1]["bloqueados_apos_retomada_aviso"] = (
+                    "celulas ja em lista anterior que apareceram depois do ponto de "
+                    "retomada: ou a retomada parou cedo (nada perdido) ou sao "
+                    "pessoas diferentes com o mesmo nome de alguem ja incluido "
+                    "(essas nao entram em lista nenhuma)")
+                prog.salvar()
+            if sp.pulados:
+                prog.historico[-1]["celulas_sem_rotulo_puladas"] = list(sp.pulados)
+                prog.historico[-1]["aviso"] = (
+                    f"{len(sp.pulados)} pessoa(s) nao entraram em lista nenhuma: a "
+                    "celula nao devolvia nome/posicao e o operador autorizou pular")
+                prog.salvar()
             log.info("lista %d criada. %s", numero_lista, prog.resumo())
             if qtd < args.limite_por_lista:
                 log.info("a agenda acabou nesta lista; nao ha mais o que criar")

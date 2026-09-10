@@ -10,10 +10,12 @@ listas de transmissão — do mesmo jeito que o PC faz com os Androids.
 > interface web **não cria** listas de transmissão.
 
 > **Estado honesto:** as regras de contatos/lotes já são as mesmas validadas no
-> Android (rodando de verdade). O **fluxo de telas do WhatsApp iOS ainda não foi
-> confirmado num iPhone** — por isso a seção 6 (descoberta) é obrigatória antes
-> de qualquer criação de lista. Os seletores em `ios_selectors.py` são palpites
-> marcados como "A CONFIRMAR".
+> Android (rodando de verdade). O **modo lista de contatos (CSV/VCF) já está
+> validado no iPhone da operação e em uso diário** — os seletores em
+> `ios_selectors.py` foram lidos no aparelho (ver os comentários "CONFIRMADO NO
+> IPHONE" no próprio arquivo). A seção 6 (descoberta) continua obrigatória para
+> um **aparelho novo** ou uma **versão nova do WhatsApp**. O Modo Scroll Livre é
+> a parte ainda não validada em escala — ver `COMO-OPERAR.md` §4.
 
 ---
 
@@ -25,6 +27,11 @@ python3 test_local.py
 ```
 Esperado: `todos os testes locais passaram.` Isso confirma regras de lote,
 conversão de contatos, redação de dados pessoais e as travas de segurança.
+
+### 0.1 Abrir a estação
+
+Depois do setup, o dia a dia é dois cliques em `iniciar_gui.command` (e
+`atualizar.command` para atualizar). O guia da operação é o `COMO-OPERAR.md`.
 
 ---
 
@@ -93,12 +100,16 @@ Num terminal separado, deixe rodando:
 appium
 ```
 
-## 6. DESCOBRIR os seletores (obrigatório — nada de clique antes disso)
+## 6. Descobrir os seletores — obrigatório para um aparelho NOVO ou uma versão nova do WhatsApp
+
+No aparelho da operação isso já foi feito; `version_prefixes` continua vazio de
+propósito, então os scripts pedem `--trust-profile` — e a estação passa esse
+argumento sozinha.
 
 Abra o WhatsApp no iPhone e, **em cada tela do fluxo**, rode:
 
 ```bash
-python3 diag_ios.py --inventory --udid <UDID> \
+python3 diag_ios.py --inventory \
   --wda-bundle com.seunome.WebDriverAgentRunner \
   --out tela-1-conversas.json
 ```
@@ -121,7 +132,7 @@ Cadastre no iPhone 3 contatos de teste: um **exato** (com WhatsApp), um
 **inexistente**, e dois com o **mesmo nome** (ambíguo). Depois:
 
 ```bash
-python3 spike_ios.py --contacts contacts.example.csv --udid <UDID> \
+python3 spike_ios.py --contacts contacts.example.csv \
   --wda-bundle com.seunome.WebDriverAgentRunner --trust-profile
 ```
 
@@ -132,15 +143,16 @@ casos saírem certos. **Só então** prossiga.
 ## 8. Medir o tempo (opcional, sem criar nada)
 
 ```bash
-python3 bench_ios.py --csv contatos.csv --udid <UDID> --n 20 --with-tap --trust-profile
+python3 bench_ios.py --csv contatos.csv --n 20 --with-tap --trust-profile
 ```
 Dá o tempo por contato e extrapola para 256/lista e 40 listas.
-Referência medida no Android: **~2,5 s/contato → ~11-15 min por lista**.
+Referência medida NESTE fluxo: **~3 s/contato no ritmo Turbo → ~13 min por
+lista de 256** (ver a tabela do `DEVICE-TEST-IOS.md`).
 
 ## 9. Criar UMA lista de teste (com aprovação explícita)
 
 ```bash
-python3 spike_ios.py --contacts contacts.example.csv --udid <UDID> \
+python3 spike_ios.py --contacts contacts.example.csv \
   --wda-bundle com.seunome.WebDriverAgentRunner --trust-profile --approve-create
 ```
 Confirme no iPhone que a lista existe e que **nenhuma mensagem foi enviada**.
@@ -182,15 +194,15 @@ Ou aplicar o filtro direto no runner (sem gerar CSV): `--uf RJ`, `--ddd 21,22`,
 
 ```bash
 # 1) planejar (não toca no iPhone)
-python3 run_ios.py --csv contatos.csv --udid <UDID> --dry-run
+python3 run_ios.py --csv contatos.csv --dry-run
 
 # 2) criar SÓ a primeira lista e conferir
-python3 run_ios.py --csv contatos.csv --udid <UDID> \
+python3 run_ios.py --csv contatos.csv \
   --wda-bundle com.seunome.WebDriverAgentRunner --wa-version <versao> \
   --approve-create --max-lists 1
 
 # 3) seguir com o resto (retoma sozinho se cair)
-python3 run_ios.py --csv contatos.csv --udid <UDID> \
+python3 run_ios.py --csv contatos.csv \
   --wda-bundle com.seunome.WebDriverAgentRunner --wa-version <versao> \
   --approve-create --pace 1.0
 ```

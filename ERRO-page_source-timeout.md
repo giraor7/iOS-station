@@ -27,7 +27,7 @@ Não é o seu WhatsApp travado — é o custo de serializar a tela toda.
 
 Com o WhatsApp aberto na aba **Conversas**:
 ```bash
-python3 probe_ios.py --udid <UDID> --wda-bundle com.seunome.WebDriverAgentRunner --out sonda.json
+python3 probe_ios.py --wda-bundle com.seunome.WebDriverAgentRunner --out sonda.json
 ```
 Ele consulta só os botões/textos da barra (rápido, sem timeout) e já diz se achou
 o candidato **"Listas de transmissão"** e qual o `type` dele. **Envie o `sonda.json`.**

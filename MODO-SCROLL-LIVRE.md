@@ -25,7 +25,7 @@ Regra prática: **agenda inteira → Scroll Livre. Só uma região → CSV.**
 
 ---
 
-## 2. Primeiro teste (obrigatório, 10 minutos)
+## 2. Primeiro teste (obrigatório) — primeiro degrau da escada
 
 Na pasta `ios-station`, com o `appium` rodando e o iPhone desbloqueado no
 WhatsApp (como no `DEVICE-TEST-IOS.md`):
@@ -52,12 +52,17 @@ python3 run_ios_scroll.py --reset-progresso
 ```
 
 Se o passo 5 começou exatamente no 6º contato, a retomada está validada.
-Só então rode a operação real.
+Só então rode a operação real. Os degraus 30 e 100 e o resto da escada de
+ensaio estão em `COMO-OPERAR.md` §5.
 
 Pela GUI (`python3 gui_ios.py`): ligue **"Modo Scroll Livre"**, escolha quantas
-listas nesta rodada, deixe "Criar listas de verdade" desligado para o ensaio,
-e clique em Iniciar. O botão **"Onde parou?"** mostra o progresso no log.
-(Pela GUI o limite é sempre 256; para o teste com 5 use a linha de comando.)
+listas nesta rodada, o **Tamanho do ensaio** oferece 5, 30 e lista cheia (o
+degrau de 100 só existe pela linha de comando), deixe "Criar listas de verdade"
+desligado para o ensaio, e clique em Iniciar. O botão **Consultar progresso**
+mostra onde parou logo abaixo do campo de listas.
+
+Sem `--approve-create`, o runner reduz `--max-listas` para 1 sozinho (é ensaio:
+nada seria criado mesmo).
 
 ---
 
@@ -131,9 +136,13 @@ Um arquivo de progresso por iPhone: ao trocar de aparelho, use
 ## 4. Como funciona por dentro (para quem for dar manutenção)
 
 1. Abre o seletor "Destinatários" pelo fluxo validado (`IosSpike.open_new_broadcast`).
-2. Lê as células `PickerView_ContactCell` **inteiramente visíveis** (posição +
-   rótulo; 2 chamadas por célula, nunca varredura da árvore — profundidade 12–18
-   fixada uma vez por lista).
+2. Lê as células do seletor pela class chain `**/XCUIElementTypeCell` —
+   **neste iPhone o accessibility id `PickerView_ContactCell` não devolve
+   nada**, e o filho `PickerView_ContactCell_PhoneNumber` volta vazio (o
+   rótulo é "Nome, recado"). 1 chamada por tela quando o driver devolve os
+   atributos na resposta da busca (`elementResponseAttributes`); se não
+   devolver, cai para célula a célula (nunca varredura da árvore —
+   profundidade 12–18 fixada uma vez por lista).
 3. Toca de cima para baixo. Cada contato é identificado pelo **nome** (o rótulo
    é "Nome, recado"; o recado muda a toda hora e é descartado) via hash.
    Tocar de novo num contato **desmarca** — por isso um hash só é tocado uma vez.
@@ -163,15 +172,12 @@ qualquer tela desconhecida = parada segura + `inventory-erro.json`.
 
 ## 5. Tempo esperado (a confirmar no primeiro teste)
 
-CORRIGIDO pela auditoria de 2026-09-10 (medido no simulador com a faixa de
-chips real, ~5-6 contatos NOVOS por tela por causa da sobreposição de 3
-linhas e da faixa de selecionados): **lista de 256 ≈ 51 telas**, não ~22-30
-como esta seção dizia antes — a conta antiga estava errada em ~70%. Por
-tela: ler ≈ 3–5 s, tocar ≈ 3–4 s, rolar ≈ 1 s (mas ver a tabela da seção 5b:
-com a leitura saudável a conta dá ~3 min; se a varredura do seletor ficar
-lenta — o sintoma do log de 2026-09-09 — pode passar de 20 min ou nem
-terminar). Retomada em listas avançadas (rolar até o ponto) soma 1–5 min.
-Meça no aparelho e anote aqui.
+**Não medido em aparelho.** O único dado real que existe é o log de
+2026-09-09: uma única leitura de tela, com zero contatos selecionados, levou
+33,6 s e voltou vazia, seguida de socket hang up. Qualquer minuto escrito
+aqui antes de medir nos degraus 3/4 da escada (`COMO-OPERAR.md` §5) seria
+inventado — por isso este documento não promete um número. Cronometre o
+degrau de 100 contatos e anote o resultado aqui.
 
 ---
 
@@ -184,12 +190,12 @@ automação de interface. O que existe é cortar chamadas desperdiçadas:
 
 | Modo | Chamadas ao iPhone | Estimativa por lista de 256 |
 |---|---|---|
-| Arquivo (CSV/VCF) até a V15 | ~28 por contato | 15 a 20 min |
-| Arquivo (CSV/VCF) agora | 5 por contato + 0,95 s de pausas (Turbo) | **~13 min (medido: 3,8 s/contato antes das últimas 3 consultas saírem)** |
+| Arquivo (CSV/VCF) antes da 4ª rodada | ~28 por contato | 15 a 20 min |
+| Arquivo (CSV/VCF) agora | 5 por contato + 0,95 s de pausas (Turbo) | **~13 min esperado (3 s/contato).** A medição de 3,8 s/contato (~16 min) é de ANTES de as três consultas saírem, em 2026-09-10; remedir com `bench_ios.py`. |
 | Arquivo (CSV/VCF), preset Máximo | 5 por contato + 0,675 s de pausas | ~12 min (mede antes: pausa curta gera "não encontrado" falso) |
-| Scroll Livre até a V14 | ~44 por tela | ~4 min |
-| Scroll Livre agora (padrão) | ~13 por tela | ~1,5 min |
-| Scroll Livre com `--turbo` | ~7 por tela, 2 delas varrendo a árvore inteira (~51 telas para 256) | CORRIGIDO 2026-09-10: NÃO confirmado no aparelho — o único dado real é o log de 2026-09-09 (uma varredura sozinha levou 33,6 s e voltou vazia, seguida de socket hang up). Com a varredura saudável a ~0,5 s: ~3 min; se ela ficar lenta, pode passar de 20 min ou nunca terminar. Não prometa "~1 min" antes de medir no aparelho. |
+| Scroll Livre antes da 3ª rodada | ~44 por tela | **não medido em aparelho** (a única medição existente é a leitura de 33,6 s de 2026-09-09, que voltou vazia e derrubou a sessão) |
+| Scroll Livre agora (padrão) | ~13 por tela | **não medido em aparelho** (idem) |
+| Scroll Livre com `--turbo` | ~7 por tela, 2 delas varrendo a árvore inteira (~51 telas para 256) | **não medido em aparelho** (idem). Não prometa "~1 min" antes de medir no aparelho. |
 
 De onde saiu o ganho, sem afrouxar trava nenhuma:
 
@@ -274,17 +280,22 @@ marcado, o botão Iniciar explica o que falta.
 
 | Sintoma no log | O que fazer |
 |---|---|
-| `nao encontrei o ponto de retomada` | O último contato mudou de nome/apagado e a ordem não bateu. `--reset-progresso` e recomece, ou use `--progress-file` novo. Antes, apague no WhatsApp as listas que seriam repetidas. |
+| `nao encontrei o ponto de retomada` | O último contato mudou de nome/apagado e a ordem não bateu. Use `--recomecar-do-A` (recomeça do A SEM duplicar: preserva a guarda contra duplicata); `--reset-progresso` também recomeça mas apaga essa memória e duplicaria todo mundo já incluído. Antes, apague no WhatsApp as listas que seriam repetidas. `--recomecar-do-A` é **recusado** (código 2) enquanto houver lista criada cujo histórico não tenha a impressão digital dos contatos (arquivo de progresso versão 1): sem ela, a guarda cobriria só parte de quem já entrou, e o resto entraria numa segunda lista. |
 | `um app externo abriu durante a selecao` | Uma célula "Convidar" passou pelo filtro. Volte ao WhatsApp, feche o seletor, rode de novo (nada foi criado). |
 | `o seletor de contatos desapareceu` | WhatsApp trocou de tela (chamada, notificação, tela bloqueada). Deixe Bloqueio Automático = Nunca; rode de novo. |
 | `o WDA nao respondeu a nenhuma consulta` | Diferente do anterior: a sessão do WebDriverAgent caiu (socket hang up). A tela do iPhone pode estar intacta, com contatos marcados. Confira o aparelho, cancele o seletor e veja `TRAVOU-EM-OPENING-BROADCAST.md`. |
 | `ancora nao confirmada apos rajada turbo` | A rajada saiu e o botão "Criar" não voltou em duas conferências. Os toques dessa rajada ficam EM DÚVIDA: o progresso grava `toques_incertos` e a lista pode ter mais destinatários do que o progresso diz. **Confira no iPhone** — esses contatos podem reaparecer na lista seguinte. |
+| `a lista de recuperacao nao cabe no tempo maximo` (código 8) | Depois de `--recomecar-do-A`, a lista precisa rolar por cima de **todos** os já usados antes de chegar em alguém novo, e essa travessia sozinha passa do `--max-minutos`. A estação recusa na largada, sem tocar em nada — a rodada gastaria a hora inteira e terminaria com zero contatos, sem avançar o progresso. O log diz de quantos minutos ela precisa. |
+| aviso `celula(s) apareceram depois da retomada` | Contatos já em lista anterior reapareceram além da âncora. Ou a retomada parou cedo (as MESMAS pessoas, nada perdido) ou são pessoas **diferentes** com o mesmo nome de alguém já incluído — e essas não entram em lista nenhuma. A tela não distingue as duas; os códigos ficam no progresso, em `bloqueados_apos_retomada`. |
 | `botao Criar esta DESABILITADO` | Menos de 2 selecionados. Fim da agenda ou o toque não está marcando: rode o ensaio com `-v` e mande o log. |
 | `nenhuma celula de contato no seletor` | Profundidade da árvore mudou (WhatsApp novo). Rode `probe_picker.py` e mande o resultado. |
 | WDA caiu / `socket hang up` | Igual ao fluxo validado: veja `TRAVOU-EM-OPENING-BROADCAST.md`. |
 | Contato pulado | Compare o total do log com o esperado. O resumo de cada lista imprime `homonimos ignorados`, `sem rotulo`, `cliques que falharam e foram refeitos` e `travados`; `sem rotulo` também sai como aviso separado. Desde 2026-09-10 um contato que não pode ser tocado PARA a lista (código 6) em vez de ser pulado em silêncio — ele é o próximo da fila na rodada seguinte. |
 | `teto de telas atingido` | NÃO é fim de agenda — o filtro de DDD é mais restritivo do que o teto suporta. O teto sobe sozinho quando há `--ddd`, até o teto absoluto de 1200 telas (~1 h de rodada). **Não adianta aumentar `--limite-por-lista`**: ele é o numerador da fórmula, o teto e o alvo crescem juntos. Use um DDD menos raro, quebre a agenda em arquivos menores, ou confira se o filtro está descartando por homônimo/número ausente. |
 | `leitura vazia lenta` / `rajada interrompida` | O WDA não respondeu a tempo (o sintoma do log de 2026-09-09). A lista é salva PARCIAL com o que já estava confirmado (código de saída 6) — a próxima rodada continua do contato seguinte automaticamente. Confira no iPhone o número de destinatários da lista criada. |
+| `leitura sem inferencia de posicao (excesso de elementos na tela)` | A tela ficou com elementos demais e a inferência de posição falhou; ler um rect por elemento custaria centenas de chamadas nesta única tela. A lista é salva PARCIAL (código 6) e a rodada seguinte continua. Se repetir sempre no mesmo tamanho, opere com `--limite-por-lista` menor. |
+| `celula sem rotulo (nao da para saber quem e)` / `sem posicao legivel` | Uma célula com a altura de uma linha de contato não devolveu nome/posição em duas leituras. A lista para ANTES dela (código 6 ou 7) para não ultrapassá-la em silêncio — ela é a próxima da fila. Se a rodada seguinte parar no MESMO ponto, é essa linha da agenda: veja `--pular-celula-ilegivel` em `COMO-OPERAR.md` §7. |
+| `orcamento de tempo da lista` | A lista passou do tempo máximo (`--max-minutos`, padrão 60). Mesmo desfecho do teto de telas: salva parcial (código 6) e a rodada seguinte continua. |
 
 ### Código de saída 6 — lista parcial criada
 
@@ -326,5 +337,6 @@ sempre no iPhone o número de destinatários da lista recém-criada.
 Testes locais (sem iPhone): `python3 test_scroll_local.py` — simula o
 seletor (faixa de chips, células parciais, homônimos, convite, contato apagado,
 retomada longe, fim da agenda, rajada interrompida, teto de telas, leitura
-lenta, profundidade que muda depois do 1o chip, e o proprio `main()` criando
-a lista parcial). 54 casos.
+lenta, profundidade que muda depois do 1o chip, guarda contra duplicata,
+orçamento de tempo, célula sem rótulo/sem posição legível, e o proprio `main()`
+criando a lista parcial). 114 casos.

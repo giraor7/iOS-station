@@ -18,6 +18,10 @@ python3 doctor_ios.py     # o que falta instalar no Mac
 
 ## Fase 1 — seu próprio iPhone (aparelho de teste)
 
+Esta fase já foi cumprida no iPhone da operação (WhatsApp com abas embaixo,
+2026-09). Ela vale para um **aparelho novo** ou uma versão nova do WhatsApp; no
+dia a dia, vá direto para `COMO-OPERAR.md`.
+
 Objetivo: descobrir o fluxo real e validar 3 casos, sem risco.
 
 1. **Cadastre 3 contatos de teste** no iPhone:
@@ -50,12 +54,12 @@ seleciona o contato errado 256 vezes.
    Contatos.app → Exportar vCard → `vcf_to_csv.py contatos.vcf -o contatos.csv --split 256`.
 3. **Planeje** (não toca no aparelho):
    ```bash
-   python3 run_ios.py --csv contatos.csv --udid <UDID> --dry-run
+   python3 run_ios.py --csv contatos.csv --dry-run
    ```
    Confira a contagem: 10 mil contatos ≈ **40 listas**.
 4. **Crie só a primeira** e confira no aparelho:
    ```bash
-   python3 run_ios.py --csv contatos.csv --udid <UDID> \
+   python3 run_ios.py --csv contatos.csv \
      --wda-bundle <seu.bundle> --wa-version <versao> --approve-create --max-lists 1
    ```
 5. Se estiver certo, libere o resto (`--pace 1.0`, sem `--max-lists`).
@@ -78,16 +82,17 @@ Mac aumenta falha de sessão e dificulta perceber um problema.
 
 ## Tempo esperado
 
-Base medida no Android (mesma pipeline): **~2,5 s por contato**.
+Números da mesma fórmula que a tela mostra (`gui_state.estimativa_minutos`), a
+partir de 1,98 s de ida-e-volta ao aparelho por contato, medidos no log do
+Appium em 2026-09-04/2026-09-10. Confirme no seu caso com `bench_ios.py`.
 
-| Ritmo | Por lista (256) | 40 listas = 10 mil |
-|---|---|---|
-| `--pace 0` | ~11 min | ~7,4 h |
-| `--pace 0.5` | ~13 min | ~8,8 h |
-| `--pace 1.0` (recomendado) | ~15 min | ~10,3 h |
+| Ritmo | speed / pace | Por lista (256) | 40 listas |
+|---|---|---|---|
+| Turbo (padrão da estação) | 0,4 / 0,1 | ~13 min | ~8,7 h |
+| Rápido | 0,6 / 0,3 | ~15 min | ~10 h |
+| Seguro (padrão da linha de comando) | 1,0 / 1,0 | ~22 min | ~14,7 h |
 
 Aparelhos em paralelo (um por Mac/estação) ≈ o tempo de **um** aparelho.
-Meça no seu caso com `bench_ios.py` (não cria nada).
 
 ---
 
@@ -111,7 +116,11 @@ Meça no seu caso com `bench_ios.py` (não cria nada).
 
 ## Se algo travar
 
-1. `python3 doctor_ios.py --udid <UDID>` — diz o que está fora do lugar.
+1. `python3 doctor_ios.py` — diz o que está fora do lugar.
 2. Tabela "Problemas comuns" no fim do `SETUP-MAC.md`.
 3. Se o script parar com `UI_CHANGED`: a tela mudou. Refaça a descoberta
    (`diag_ios.py --inventory`) nessa tela — **não force**. O progresso está salvo.
+4. Se o script (Modo Scroll Livre) sair com código 6, não é falha: a lista foi
+   criada parcial com os contatos já confirmados e a próxima rodada continua do
+   seguinte. Confira o número de destinatários no iPhone. Código 7: a estação
+   parou por uma regra dela e não criou lista nenhuma — nada foi perdido.

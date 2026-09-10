@@ -1,8 +1,9 @@
 """Runner operacional iOS — cria listas de transmissao em lote a partir de um CSV,
 via Appium XCUITest no Mac. Espelho do run_android.py (que ja rodou de verdade).
 
-Fluxo: CSV -> E.164 (libphonenumber) -> dedupe -> lotes de ate 256 ->
-"Transmissão 001, 002, ..." com ritmo configuravel e RETOMADA.
+Fluxo: CSV -> E.164 (libphonenumber) -> dedupe -> lotes de ate 256 com ritmo
+configuravel e RETOMADA. As listas ficam com o nome padrao do WhatsApp (a
+estacao nao renomeia); "Transmissao NNN" e so o rotulo do arquivo de progresso.
 Listas em sequencia: depois de cada "Criar" a estacao volta para Conversas
 antes de abrir a proxima (o progresso da lista e gravado antes da volta).
 Sessao em varios dias: quem ja esta numa lista criada (hash no progresso)
@@ -86,6 +87,23 @@ def limite_de_lote(valor: int) -> int:
     if valor is None or valor <= 0:
         return BROADCAST_LIMIT
     return max(MIN_RECIPIENTS, min(valor, BROADCAST_LIMIT))
+
+
+# Ida-e-volta ao aparelho por contato, medida no log do Appium
+# (2026-09-04/2026-09-10). MESMO valor de gui_state.SEGUNDOS_DE_CHAMADAS —
+# travado por teste para as duas fontes de verdade nao divergirem.
+SEGUNDOS_DE_CHAMADAS = 1.98
+SEGUNDOS_POR_LISTA = 17.0
+
+
+def estimativa_segundos(pace: float, speed: float, quantidade: int = BROADCAST_LIMIT) -> float:
+    """Segundos aproximados para UMA lista. Mesma conta da tela
+    (gui_state.estimativa_minutos): chamadas medidas + pausas do settle().
+    E estimativa, nao medicao — confirme no seu caso com bench_ios.py."""
+    apos_digitar = max(1.5 * speed, 0.375)
+    apos_tocar = max(0.5 * speed, 0.25)
+    return SEGUNDOS_POR_LISTA + quantidade * (
+        SEGUNDOS_DE_CHAMADAS + apos_digitar + apos_tocar + pace)
 
 
 class Progress:
@@ -221,9 +239,10 @@ def main() -> int:
                     MIN_RECIPIENTS, pequenos)
 
     if args.dry_run:
-        est = 12 + 256 * (2.5 + args.pace) + 5
-        log.info("estimativa: ~%.0f min por lista cheia com pace=%.1fs "
-                 "(base medida no Android)", est / 60, args.pace)
+        est = estimativa_segundos(args.pace, args.speed)
+        log.info("estimativa: ~%.0f min por lista cheia com --pace %.1f e --speed "
+                 "%.1f (chamadas medidas no aparelho + pausas; e estimativa, "
+                 "nao medicao)", est / 60, args.pace, args.speed)
         log.info("dry-run: o iPhone nao foi tocado.")
         return 0
 

@@ -23,6 +23,10 @@ LIMITE_LISTA = 256          # limite do WhatsApp por lista de transmissao
 MIN_DESTINATARIOS = 2       # o WhatsApp nao cria lista com menos que isso
 MAX_LISTAS_RODADA = 36      # teto por rodada no Modo Scroll Livre
 MIN_LISTAS_RODADA = 1
+# Orcamento de tempo de UMA lista do Scroll Livre (espelha
+# run_ios_scroll.ORCAMENTO_PADRAO_S — o par entre as duas fontes de verdade e
+# travado por teste). Estourou: a lista para com salvamento parcial.
+MAX_MINUTOS_POR_LISTA = 60
 
 # Escada de ensaio do Modo Scroll Livre (auditoria 2026-09-10): 0 = lista
 # cheia (nao manda --limite-por-lista; e o padrao de sempre, ninguem que ja
@@ -35,6 +39,22 @@ PRESETS_ENSAIO_SCROLL: dict[str, int] = {
     f"Lista cheia ({LIMITE_LISTA} contatos)": 0,
 }
 ENSAIO_SCROLL_PADRAO = f"Lista cheia ({LIMITE_LISTA} contatos)"
+
+# Textos da GUI que o codigo precisa sustentar (auditoria 2026-09-10): ficam
+# aqui, e nao em gui_ios.py, para poderem ser testados sem abrir janela.
+TEXTO_PAINEL_SCROLL = (
+    "Neste modo a estação não usa arquivo de contatos para escolher quem "
+    "entra: ela abre a tela de destinatários e marca os contatos na ordem "
+    "alfabética em que o WhatsApp os mostra, até completar a lista. O filtro "
+    "de DDD continua valendo, mas precisa da agenda exportada — a tela do "
+    "WhatsApp não mostra o número.")
+
+TEXTO_TURBO = (
+    "Toca todos os contatos de uma tela numa requisição só. O ganho de "
+    "velocidade NÃO foi medido neste iPhone. Ligue só depois de o ensaio de "
+    "5 e o de 30 contatos terem passado sem Turbo: nesse modo, um aviso que "
+    "apareça no meio da tela não barra o toque, e a estação interrompe a "
+    "lista por segurança.")
 
 
 # ── DDDs ─────────────────────────────────────────────────────────────────────
@@ -441,11 +461,18 @@ def resumo_confirmacao(fonte: Fonte, execucao: Execucao, resumo: ResumoArquivo |
         linhas.append(("Filtro de DDD", descrever_ddds(ddds) + ", decidido pelo nome"))
         linhas.append(("Contatos", f"{contatos_filtrados:,}".replace(",", ".")
                        + " da agenda nos DDDs; entram na ordem do WhatsApp"))
+        linhas.append(("Tempo máximo por lista",
+                       f"{MAX_MINUTOS_POR_LISTA} min — passou disso, a estação salva "
+                       "o que já confirmou e para"))
     else:
         linhas.append(("Fonte", "Modo Scroll Livre (sem arquivo)"))
         linhas.append(("Filtro de DDD", "não se aplica"))
         linhas.append(("Contatos", "definidos pela ordem da agenda no WhatsApp"))
+        linhas.append(("Tempo máximo por lista",
+                       f"{MAX_MINUTOS_POR_LISTA} min — passou disso, a estação salva "
+                       "o que já confirmou e para"))
     linhas.append(("Listas", f"{listas} de até {limite or LIMITE_LISTA} contatos"))
+    linhas.append(("Nome das listas", "o padrão do WhatsApp (a estação não renomeia)"))
     return linhas
 
 
@@ -523,12 +550,28 @@ def etapa_humana(linha: str) -> str:
         # "teto de telas" no motivo gravado: casar pelo trecho comum.
         ("teto de telas", "Chegou ao limite de telas desta lista sem "
                           "esgotar a agenda; salvando o que foi confirmado…"),
+        ("orcamento de tempo", "A lista passou do tempo máximo; salvando o que "
+                               "foi confirmado…"),
+        ("leitura sem inferencia", "A tela ficou com elementos demais para ler "
+                                   "com segurança; parei antes de arriscar a sessão…"),
         ("rajada interrompida", "O toque em lote foi interrompido; conferindo "
                                 "o que foi confirmado…"),
         ("ancora nao confirmada", "O botão Criar não reapareceu depois do toque "
                                   "em lote; conferindo com segurança…"),
         ("contato inalcancavel", "Um contato não pôde ser tocado nesta tela; "
                                  "parei antes de deixá-lo para trás."),
+        # As duas paradas por celula ilegivel (run_ios_scroll.PARADA_SEM_ROTULO
+        # e PARADA_SEM_RECT). Sem estas frases a tela ficava exibindo
+        # "Marcando contatos…" depois de a selecao ja ter parado — e o teste
+        # que jurava cobrir "toda parada nomeada" era cego a elas, porque as
+        # duas sao atribuidas por uma expressao, nao por um literal.
+        ("celula sem rotulo", "Uma linha da agenda não disse quem é o contato; "
+                              "parando com segurança para não pular ninguém…"),
+        ("sem posicao legivel", "Uma linha da agenda não respondeu onde está na "
+                                "tela; parando com segurança para não pular "
+                                "ninguém…"),
+        ("nao cabe no tempo maximo", "A lista de recuperação não cabe no tempo "
+                                     "máximo por lista; nada foi tocado."),
     )
     for chave, frase in tabela:
         if chave in baixa:
@@ -565,6 +608,22 @@ _DESFECHOS: dict[int, Desfecho] = {
                 "A seleção foi interrompida no meio (rede lenta ou toque perdido), "
                 "mas a lista foi criada com os contatos já confirmados. A próxima "
                 "rodada continua automaticamente do contato seguinte.", "atencao"),
+    7: Desfecho("Parou por uma regra da estação",
+                "A estação parou sozinha por uma regra de segurança (tempo máximo da "
+                "lista, ou uma linha da agenda que não devolveu o nome) e NÃO criou "
+                "lista nenhuma. Nada foi perdido: o progresso não avançou. O motivo "
+                "está na última linha do log técnico.", "atencao"),
+    8: Desfecho("A lista de recuperação não cabe no tempo máximo",
+                "Depois de --recomecar-do-A (ou de um progresso sem ponto de "
+                "retomada), a estação precisa passar por TODOS os contatos que já "
+                "entraram em listas antes de chegar em alguém novo — e isso não "
+                "cabe no tempo máximo por lista. Nada foi tocado e nada foi "
+                "perdido — e repetir pela estação daria exatamente no mesmo, "
+                f"porque ela sempre manda {MAX_MINUTOS_POR_LISTA} min. A última linha do "
+                "log técnico diz de quantos minutos essa lista precisa: rode "
+                "essa rodada pelo Terminal com --max-minutos maior, ou fale com "
+                "o suporte técnico.",
+                "erro"),
 }
 
 _INTERROMPIDO = Desfecho(
@@ -594,7 +653,7 @@ _ERROS_CONHECIDOS: list[tuple[tuple[str, ...], Desfecho]] = [
               "Desbloqueie o aparelho e toque em Confiar. Depois: Ajustes › Geral › VPN "
               "e Gestão do Dispositivo › confie no perfil do desenvolvedor.", "erro")),
     (("could not connect to server", "connection refused", "urlopen error",
-      "max retries exceeded"),
+      "max retries exceeded", "o appium nao esta rodando"),
      Desfecho("O Appium não está rodando",
               "Ligue 'Iniciar Appium automaticamente' em Configurações e reabra a "
               "estação, ou rode 'appium' num terminal à parte.", "erro")),

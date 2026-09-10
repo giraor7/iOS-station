@@ -65,7 +65,7 @@ Cadastre no iPhone os 3 contatos de teste (exato / inexistente / dois com o mesm
 nome) e rode:
 
 ```bash
-python3 spike_ios.py --contacts contacts.example.csv --udid <UDID> \
+python3 spike_ios.py --contacts contacts.example.csv \
   --wda-bundle com.seunome.WDARunner --trust-profile
 ```
 

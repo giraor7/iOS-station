@@ -329,6 +329,32 @@ class Progresso(unittest.TestCase):
                                       [], 0, 3)
         self.assertIn(("Listas", f"3 de até {st.LIMITE_LISTA} contatos"), cheia)
 
+    def test_nome_das_listas_aparece_na_confirmacao(self):
+        """A caixa de confirmacao e o ultimo ponto humano antes de mexer no
+        WhatsApp: ela precisa dizer que a estacao nao renomeia as listas (a
+        nomeacao automatica foi retirada)."""
+        esperado = ("Nome das listas", "o padrão do WhatsApp (a estação não renomeia)")
+        self.assertIn(esperado, st.resumo_confirmacao(
+            st.Fonte.ARQUIVO, st.Execucao.REAL, None, [], 10, 1))
+        self.assertIn(esperado, st.resumo_confirmacao(
+            st.Fonte.SCROLL, st.Execucao.REAL, None, [], 0, 1))
+
+
+class TextosDaGuiSaoHonestos(unittest.TestCase):
+    """gui_ios.py so referencia estas constantes — o texto em si vive aqui
+    para poder ser testado sem abrir janela (auditoria 2026-09-10)."""
+
+    def test_painel_scroll_nao_contradiz_o_cartao_de_ddd(self):
+        """O painel do Scroll Livre oferece um campo de agenda para filtrar
+        por DDD; o texto nao pode dizer que o modo 'nao usa... filtro de DDD'."""
+        self.assertNotIn("nem filtro de DDD", st.TEXTO_PAINEL_SCROLL)
+        self.assertIn("agenda", st.TEXTO_PAINEL_SCROLL.lower())
+
+    def test_turbo_nao_promete_multiplicador_nao_medido(self):
+        import re
+        self.assertIsNone(re.search(r"\d+\s*vezes", st.TEXTO_TURBO))
+        self.assertIn("foi medido", st.TEXTO_TURBO.lower())
+
 
 class Desfechos(unittest.TestCase):
 
@@ -376,6 +402,57 @@ class Desfechos(unittest.TestCase):
         self.assertEqual(d.tom, "atencao")
         self.assertIn("parcial", d.titulo.lower())
         self.assertTrue(d.orientacao)
+
+    def test_codigo_7_e_parada_por_regra_nao_erro_de_ui(self):
+        """codigo 7: a estacao parou por uma regra dela (orcamento de tempo,
+        celula ilegivel, rajada interrompida sem parcial possivel) e NAO
+        criou lista nenhuma. Nao pode ser confundido com o 4 (UI mudou, manda
+        o operador ao inventory-erro.json)."""
+        d = st.desfecho_para(7)
+        self.assertEqual(d.tom, "atencao")
+        self.assertIn("regra", d.titulo.lower())
+        self.assertNotIn("inventory", d.orientacao.lower())
+        self.assertTrue(d.orientacao)
+
+
+class OrcamentoDeTempoNaGui(unittest.TestCase):
+    """MAX_MINUTOS_POR_LISTA e run_ios_scroll.ORCAMENTO_PADRAO_S sao duas
+    fontes de verdade para o MESMO numero — travadas por teste para nao
+    divergirem silenciosamente."""
+
+    def test_constante_da_gui_bate_com_a_do_runner(self):
+        import run_ios_scroll as rs
+        self.assertEqual(st.MAX_MINUTOS_POR_LISTA * 60, rs.ORCAMENTO_PADRAO_S)
+
+    def test_o_padrao_do_cli_e_derivado_da_constante(self):
+        """O par travado por teste era entre DUAS CONSTANTES; o orcamento real
+        de uma rodada de terminal vinha de um literal solto no argparse, que
+        ninguem comparava com nada."""
+        import run_ios_scroll as rs
+        self.assertEqual(rs.construir_parser().get_default("max_minutos"),
+                         st.MAX_MINUTOS_POR_LISTA)
+
+    def test_lista_de_recuperacao_grande_demais_tem_texto_proprio(self):
+        """A recusa antecipada da lista de recuperacao (codigo 8) precisa
+        chegar a operadora como texto, nao so no log tecnico."""
+        d = st.desfecho_para(8)
+        self.assertEqual(d.tom, "erro")
+        self.assertIn("recupera", d.titulo.lower())
+        self.assertIn("tempo máximo", d.orientacao)
+
+    def test_confirmacao_do_scroll_mostra_o_tempo_maximo(self):
+        linhas = st.resumo_confirmacao(st.Fonte.SCROLL, st.Execucao.REAL, None,
+                                       [], 0, 1)
+        rotulos = [r for r, _ in linhas]
+        self.assertIn("Tempo máximo por lista", rotulos)
+        valor = dict(linhas)["Tempo máximo por lista"]
+        self.assertIn(str(st.MAX_MINUTOS_POR_LISTA), valor)
+
+    def test_etapa_humana_traduz_o_estouro_de_tempo(self):
+        linha = ("WARNING selecao desta lista foi interrompida: orcamento de "
+                 "tempo da lista")
+        self.assertEqual(st.etapa_humana(linha),
+                         "A lista passou do tempo máximo; salvando o que foi confirmado…")
 
 
 class Ritmo(unittest.TestCase):

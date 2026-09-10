@@ -249,6 +249,7 @@ class RunnerThread:
             cmd = [sys.executable, str(base / "run_ios_scroll.py"),
                    "--server", self._cfg.server,
                    "--max-listas", str(self._scroll_lists),
+                   "--max-minutos", str(st.MAX_MINUTOS_POR_LISTA),
                    "--trust-profile"]
             if self._turbo:
                 cmd.append("--turbo")
@@ -425,9 +426,7 @@ class OperationView(ctk.CTkScrollableFrame):
         self._painel_scroll.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             self._painel_scroll,
-            text=("Neste modo a estação não usa arquivo nem filtro de DDD. Ela abre "
-                  "a tela de destinatários e marca os contatos na ordem alfabética "
-                  "em que o WhatsApp os mostra, até completar a lista."),
+            text=st.TEXTO_PAINEL_SCROLL,
             font=ui.f_apoio(), text_color=C.TEXTO_2, anchor="w", justify="left",
             wraplength=620).grid(row=0, column=0, sticky="ew")
 
@@ -496,9 +495,7 @@ class OperationView(ctk.CTkScrollableFrame):
             corner_radius=4).grid(row=3, column=0, sticky="w", pady=(S.LG, 0))
         ctk.CTkLabel(
             self._painel_scroll,
-            text=("Cerca de 3 vezes mais rápido. Ligue só depois de o teste de 5 "
-                  "contatos ter passado neste iPhone: no turbo, um aviso que apareça "
-                  "no meio da tela interrompe a lista por segurança."),
+            text=st.TEXTO_TURBO,
             font=ui.f_legenda(), text_color=C.TEXTO_3, anchor="w", justify="left",
             wraplength=620).grid(row=4, column=0, sticky="ew", pady=(S.XS, 0))
 

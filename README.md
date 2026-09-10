@@ -17,7 +17,9 @@ python3 run_ios_scroll.py --trust-profile --approve-create --max-listas 3       
 python3 run_ios_scroll.py --progresso                                             # onde parou
 ```
 
-Na GUI (`gui_ios.py`): interruptor "Modo Scroll Livre" + "listas nesta rodada" + botão "Onde parou?".
+Na estação: cartão **Usar Scroll Livre**, campo **Listas nesta rodada**, seletor
+**Tamanho do ensaio** (5 / 30 / lista cheia), caixa **Turbo** e botão **Consultar
+progresso**.
 
 ## A interface (Estação iOS)
 
@@ -109,6 +111,7 @@ python3 test_local.py     # 1) valida o pacote SEM iPhone (2 min)
 python3 doctor_ios.py     # 2) diz o que falta instalar no Mac
 ```
 Depois siga, nesta ordem:
+0. **`COMO-OPERAR.md`** — o guia do dia a dia (comece por ele se você vai operar, não desenvolver).
 1. **`SETUP-MAC.md`** — instalação completa e passo a passo (Xcode, WDA, iPhone).
 2. **`DEVICE-TEST-IOS.md`** — ordem de teste: seu iPhone primeiro, depois os outros.
 
@@ -120,7 +123,7 @@ aparelho por fora. Não há atalho.
 
 ## Arquivos
 
-- `run_ios_scroll.py` — **Modo Scroll Livre** (sem CSV); `test_scroll_local.py` — 15 testes offline; `MODO-SCROLL-LIVRE.md` — guia.
+- `run_ios_scroll.py` — **Modo Scroll Livre** (sem CSV); `test_scroll_local.py` — 114 testes offline; `MODO-SCROLL-LIVRE.md` — guia.
 
 | Arquivo | O que faz |
 |---|---|
@@ -130,7 +133,7 @@ aparelho por fora. Não há atalho.
 | `ios_selectors.py` | Perfis de seletores por versão — **a preencher** na descoberta. |
 | `spike_ios.py` | Valida o fluxo com 3 casos; para antes de criar. Caminho rápido por class chain. |
 | `bench_ios.py` | Mede o tempo por contato **sem criar nada**. |
-| `run_ios.py` | Runner: CSV → **filtros DDD/UF/região** → lotes de 256 → `Transmissão NNN`, com ritmo e retomada. |
+| `run_ios.py` | Runner: CSV → **filtros DDD/UF/região** → lotes de 256, com ritmo e retomada (o rótulo `Transmissão NNN` é só do arquivo de progresso; as listas ficam com o **nome padrão do WhatsApp**). |
 | `regions.py` | Tabela DDD → UF → região (67 DDDs, 27 UFs) e filtros por área. |
 | `filter_contacts.py` | Filtra/segmenta um CSV por DDD/UF/região (report, split-by, exclusões). Não toca no iPhone. |
 | `vcf_to_csv.py` | Converte contatos exportados do Mac (vCard) em CSV, deduplicado e em lotes. |
@@ -153,8 +156,8 @@ python3 filter_contacts.py contatos.csv --split-by uf
 Ou direto no runner, sem CSV intermediário:
 
 ```
-python3 run_ios.py --csv contatos.csv --udid <UDID> --uf RJ --dry-run
-python3 run_ios.py --csv contatos.csv --udid <UDID> --regiao Sudeste --excluir-ddd 11 --dry-run
+python3 run_ios.py --csv contatos.csv --uf RJ --dry-run
+python3 run_ios.py --csv contatos.csv --regiao Sudeste --excluir-ddd 11 --dry-run
 ```
 | `batching.py` | Regras puras (E.164, dedupe, lotes) — idênticas às do Android. |
 | `setup_mac.sh` | Instalador (Homebrew, Node, Appium, driver XCUITest, deps). |
@@ -164,10 +167,14 @@ python3 run_ios.py --csv contatos.csv --udid <UDID> --regiao Sudeste --excluir-d
 
 - ✅ **Regras de contatos/lotes**: testadas e idênticas às já validadas no Android.
 - ✅ **Travas de segurança**: testadas (nunca envia, exige aprovação, para em UI desconhecida).
-- ⚠️ **Fluxo de tela do WhatsApp iOS**: **ainda não confirmado num iPhone**. Os
-  seletores em `ios_selectors.py` são palpites marcados "A CONFIRMAR". Por isso a
-  seção 6 do `SETUP-MAC.md` (descoberta) é obrigatória antes de criar listas.
-  Enquanto a versão não for registrada, os scripts exigem `--trust-profile`.
+- ✅ **Modo lista de contatos (CSV/VCF)**: validado no iPhone da operação e em uso
+  diário. Os seletores em `ios_selectors.py` foram lidos no aparelho (ver os
+  comentários "CONFIRMADO NO IPHONE" no próprio arquivo). Como `version_prefixes`
+  continua vazio de propósito, os scripts pedem `--trust-profile` — a estação já
+  passa esse argumento sozinha.
+- ⚠️ **Modo Scroll Livre**: nunca passou de 2 listas de 5 contatos em aparelho.
+  Tudo acima disso é conta, não medição. Ver a escada de ensaio em
+  `COMO-OPERAR.md`.
 
 ## Segurança (igual ao Android)
 
@@ -176,7 +183,8 @@ python3 run_ios.py --csv contatos.csv --udid <UDID> --regiao Sudeste --excluir-d
 - Estado de UI desconhecido ⇒ para (`UI_CHANGED`), sem clicar no escuro.
 - Só seleciona **match exato e único**; ambíguo nunca é tocado.
 - Sem coordenadas fixas, sem XPath, sem esperas fixas.
-- **Logs** sempre mascarados (hash + 2 dígitos): nunca mostram número nem nome.
+- **Logs** sempre mascarados (hash + 2 dígitos): nunca mostram o número inteiro
+  nem o nome.
 - **Progresso**: `progress.ios.local.json` (modo CSV) só tem hashes.
   `progress.scroll.local.json` (Modo Scroll Livre) guarda, além dos hashes, o
   **nome do último contato de cada lista** — é o que permite retomar na ordem
@@ -197,9 +205,17 @@ Para gerar a partir do iPhone: Contatos.app → Exportar vCard → `vcf_to_csv.p
 
 ## Tempo esperado
 
-~3,8 s/contato **medido neste iPhone** no modo lista de contatos (Appium, 2026-09-04) ⇒ **~16 min por lista de 256**. Cerca de 2,5 s disso são chamadas ao aparelho e ~1 s são pausas. As três consultas retiradas em 2026-09-10 devem levar a ~3 s/contato (~13 min): confirme com `bench_ios.py --with-tap` antes e depois. Um minuto por lista **não é alcançável neste modo**: só limpar o campo, digitar e tocar já custa ~1,55 s por contato, ou 6,6 min por lista, sem contar a leitura da tela.
+**~3 s por contato** no modo lista de contatos, ou **~13 min por lista de 256**,
+no ritmo Turbo (o padrão da estação). Antes de 2026-09-10 eram 3,8 s (~16 min):
+três consultas por contato saíram nessa data. É o mesmo número que a tela de
+Configurações mostra (`gui_state.estimativa_minutos`). Ritmos mais lentos
+demoram mais: com os padrões da linha de comando (`--speed 1.0 --pace 1.0`) dá
+~22 min por lista. Meça no seu caso com `bench_ios.py`.
+
+Um minuto por lista **não é alcançável neste modo**: só limpar o campo, digitar e
+tocar já custa ~1,55 s por contato, ou 6,6 min por lista, sem contar a leitura da
+tela.
 **~8-10 h** para 10 mil contatos num aparelho. Aparelhos em paralelo ≈ tempo de um.
-Confirme no seu caso com `bench_ios.py`.
 
 ## Atenção operacional
 
