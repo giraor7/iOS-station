@@ -958,6 +958,28 @@ class Ambiguous(Exception):
 
 # ---------------- driver ----------------
 
+def appium_disponivel(server: str, timeout: float = 3.0) -> bool:
+    """GET /status no servidor Appium. Evita abrir sessao contra a porta
+    fechada — que rende 3 tentativas e 60 linhas de traceback para dizer
+    'nao esta rodando'."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(server.rstrip("/") + "/status", timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def exigir_appium(server: str) -> bool:
+    """Loga a instrucao certa quando o Appium nao responde. True = pode seguir."""
+    if appium_disponivel(server):
+        return True
+    log.error("o Appium nao esta rodando em %s. Abra OUTRO terminal e deixe rodando "
+              "`appium --log-level info` (ou abra a estacao pelo gui_ios.py, que o "
+              "inicia sozinha), depois rode este comando de novo.", server)
+    return False
+
+
 def _ajustes_experimentais() -> dict:
     """Settings de sessao opcionais, cada um com sua chave de ambiente, para
     isolar no aparelho o que ajuda e o que atrapalha (ver IosSpike.__init__)."""

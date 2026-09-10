@@ -30,6 +30,7 @@ import time
 import batching
 import regions
 from ios_selectors import BASELINE, profile_for_version
+from spike_ios import exigir_appium
 from spike_ios import (BROADCAST_LIMIT, MIN_RECIPIENTS, IosSpike, State,
                        UiChanged, UnsafeState, build_driver)
 
@@ -173,6 +174,8 @@ def main() -> int:
         return 0
 
     progress = Progress(args.progress)
+    if not exigir_appium(args.server):
+        return 2
     driver = build_driver(args.server, args.wda_bundle or None)
     criadas = 0
     try:

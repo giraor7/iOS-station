@@ -885,6 +885,8 @@ def main() -> int:
              "CRIAR DE VERDADE" if args.approve_create else "ENSAIO (nao cria)",
              args.max_listas, args.limite_por_lista)
 
+    if not spike_ios.exigir_appium(args.server):
+        return 2
     driver = build_driver(args.server, args.wda_bundle or None)
     try:
         profile = profile_for_version(args.wa_version)
