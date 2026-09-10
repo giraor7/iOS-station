@@ -92,6 +92,23 @@ class ComandoDoScrollLivre(unittest.TestCase):
         self.assertNotIn("--approve-create",
                          runner(scroll=True, scroll_lists=2).comando())
 
+    def test_limite_por_lista_e_propagado_quando_pedido(self):
+        """Auditoria 2026-09-10: sem isto, so o terminal alcancava o ensaio de
+        5/30 contatos — quem abria a estacao ia direto para a lista cheia."""
+        cmd = runner(scroll=True, scroll_lists=2, limite=5).comando()
+        self.assertEqual(cmd[cmd.index("--limite-por-lista") + 1], "5")
+
+    def test_sem_limite_pedido_nao_manda_o_argumento(self):
+        """0 (ou omitido) preserva o comportamento de sempre: lista cheia,
+        sem novidade para quem ja usava a estacao."""
+        self.assertNotIn("--limite-por-lista", runner(scroll=True, scroll_lists=2).comando())
+        self.assertNotIn("--limite-por-lista",
+                         runner(scroll=True, scroll_lists=2, limite=0).comando())
+
+    def test_limite_por_lista_tambem_vale_no_modo_arquivo(self):
+        cmd = runner(limite=30).comando()
+        self.assertEqual(cmd[cmd.index("--limite-por-lista") + 1], "30")
+
 
 class ParadaSegura(unittest.TestCase):
 

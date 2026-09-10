@@ -645,7 +645,7 @@ class IosSpike:
         self._rotulos_celulas = None
         return []
 
-    def _find_raw(self, sel, com_rect: bool = False):
+    def _find_raw(self, sel, com_rect: bool = False, chave: str | None = None):
         """Busca pontual CRUA, percorrendo as camadas do seletor na mesma ordem
         de find_all (accessibility id -> class chain -> predicados) e lendo os
         atributos da propria resposta (elementResponseAttributes).
@@ -657,12 +657,21 @@ class IosSpike:
 
         Licao do iPhone da Isabella (iOS 26.6): as celulas do seletor NAO tem o
         id PickerView_ContactCell; so aparecem pela class chain. Uma busca crua
-        que so olhava o id devolvia [] e os contatos 2+ saiam "nao encontrado"."""
+        que so olhava o id devolvia [] e os contatos 2+ saiam "nao encontrado".
+
+        `chave`: quando informada, compartilha o MESMO cache de camada que
+        find_all usa (self._camada_ok). Sem isto, cada chamada tentava de novo
+        a camada morta (accessibility id, que neste iPhone sempre volta vazio)
+        antes da que funciona — em 256 contatos, ~52 buscas perdidas so nisso
+        (auditoria 2026-09-10). Vazio na camada lembrada NAO e definitivo (a
+        faixa de chips pode ter afundado a arvore); ai sim refaz todas."""
         if self._attrs_ok is False or not self.attrs_na_resposta or sel is None:
             return None
         executor = getattr(self.d, "command_executor", None)
         usa_executor = executor is not None and hasattr(executor, "execute")
-        for by, val in self._locators(sel):
+
+        def _tentar(by, val):
+            """('ok', itens) | ('vazio', None) | ('erro', None)."""
             params = {"using": by, "value": val}
             try:
                 if usa_executor:
@@ -672,28 +681,28 @@ class IosSpike:
                     resp = self.d.execute("findElements", params)
             except Exception:                # driver falso nos testes, WDA antigo...
                 self._attrs_ok = False
-                return None
+                return "erro", None
             if not isinstance(resp, dict) or resp.get("status") not in (None, 0):
                 self._attrs_ok = False
-                return None
+                return "erro", None
             itens = resp.get("value") or []
             if isinstance(itens, dict):      # erro W3C vem como {"error": ...}
-                continue                     # camada invalida neste driver: proxima
+                return "vazio", None         # camada invalida neste driver: proxima
             if not itens:
-                continue                     # nada nesta camada: tenta a proxima
+                return "vazio", None         # nada nesta camada: tenta a proxima
             out = []
             for it in itens:
                 if not isinstance(it, dict) or ("label" not in it and "name" not in it
                                                 and "value" not in it):
                     self._attrs_ok = False
-                    return None
+                    return "erro", None
                 if com_rect and not isinstance(it.get("rect"), dict):
                     self._attrs_ok = False
-                    return None
+                    return "erro", None
                 eid = it.get("element-6066-11e4-a52e-4f735466cecf") or it.get("ELEMENT")
                 if not eid:
                     self._attrs_ok = False
-                    return None
+                    return "erro", None
                 r = it.get("rect") or {}
                 out.append({
                     "el": self.d.create_web_element(eid),
@@ -703,6 +712,26 @@ class IosSpike:
                     if r else None,
                 })
             self._attrs_ok = True
+            return "ok", out
+
+        if chave is not None:
+            lembrada = self._camada_ok.get(chave)
+            if lembrada is not None:
+                status, out = _tentar(*lembrada)
+                if status == "ok" and out:
+                    return out
+                if status == "erro":
+                    return None
+                self._camada_ok.pop(chave, None)   # vazio: refaz todas as camadas
+
+        for by, val in self._locators(sel):
+            status, out = _tentar(by, val)
+            if status == "erro":
+                return None
+            if status == "vazio":
+                continue
+            if chave is not None:
+                self._camada_ok[chave] = (by, val)
             return out
         return None
 
@@ -710,7 +739,7 @@ class IosSpike:
         """Celulas do picker; quando a resposta crua traz os rotulos, guarda-os
         alinhados em self._rotulos_celulas (0 chamadas extras). Vazio na busca
         crua => find_all decide (percorre as mesmas camadas)."""
-        cru = self._find_raw(self.p.selectors.get("contact_cell"))
+        cru = self._find_raw(self.p.selectors.get("contact_cell"), chave="contact_cell")
         if not cru:
             self._rotulos_celulas = None
             return self.find_all("contact_cell")
@@ -725,7 +754,7 @@ class IosSpike:
         rotulos = self._rotulos_celulas
         if not rotulos or len(rotulos) != len(cells):
             return None
-        cru = self._find_raw(self.p.selectors.get("contact_phone"))
+        cru = self._find_raw(self.p.selectors.get("contact_phone"), chave="contact_phone")
         if not cru or len(cru) != len(cells):
             return None
         return [c["label"] for c in cru], list(rotulos)

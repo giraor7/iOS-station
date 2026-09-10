@@ -79,6 +79,69 @@ def main() -> int:
             n_rows = n_fone = -1
         print(f"linhas de contato: {n_rows} | com campo de numero: {n_fone}")
 
+        # ETAPA 0.5 da auditoria de 2026-09-10 (SOMENTE-LEITURA): decide se o
+        # ensaio de 256 e viavel ANTES de tentar. Marque 2 contatos NA MAO no
+        # iPhone antes de rodar este probe — sem isso os itens abaixo sobre
+        # "com 2 marcados" ficam vazios/errados.
+        print("\n=== ETAPA 0.5: custo da leitura do seletor cheio ===")
+        try:
+            t0 = time.monotonic()
+            globais = d.find_elements(AppiumBy.IOS_CLASS_CHAIN, "**/XCUIElementTypeCell")
+            dur_global = time.monotonic() - t0
+        except WebDriverException as exc:
+            globais, dur_global = [], -1.0
+            print(f"   busca global falhou: {exc}")
+        print(f"   '**/XCUIElementTypeCell' (global, inclui faixa de chips/NavBar/"
+              f"Conversas atras do modal): {len(globais)} elemento(s) em {dur_global:.3f}s")
+        if dur_global > 8.0:
+            print("   ATENCAO: acima de 8s. NAO faca o ensaio de 256 antes de corrigir "
+                 "o custo de leitura (cache de camada + escopo na tabela).")
+
+        try:
+            tabelas = d.find_elements(AppiumBy.IOS_CLASS_CHAIN, "**/XCUIElementTypeTable")
+            if not tabelas:
+                tabelas = d.find_elements(AppiumBy.IOS_CLASS_CHAIN,
+                                          "**/XCUIElementTypeCollectionView")
+        except WebDriverException:
+            tabelas = []
+        if tabelas:
+            try:
+                t0 = time.monotonic()
+                escopo = tabelas[0].find_elements(AppiumBy.IOS_CLASS_CHAIN,
+                                                  "**/XCUIElementTypeCell")
+                dur_escopo = time.monotonic() - t0
+            except WebDriverException as exc:
+                escopo, dur_escopo = [], -1.0
+                print(f"   busca com escopo falhou: {exc}")
+            print(f"   busca COM ESCOPO na tabela: {len(escopo)} elemento(s) em "
+                 f"{dur_escopo:.3f}s")
+            if len(escopo) < len(globais):
+                print("   NAO ADOTAR o escopo: devolveu MENOS celulas que a busca global "
+                     "(a tabela encontrada pode nao ser a certa).")
+            elif dur_escopo < dur_global:
+                print("   Escopo parece seguro: mesma contagem, mais rapido.")
+        else:
+            print("   nenhum XCUIElementTypeTable/CollectionView encontrado para testar o escopo")
+
+        try:
+            ancora = acc(d, "ParticipantPickerNavigationBar_RightBarButton")
+        except WebDriverException:
+            ancora = None
+        if ancora:
+            a = attrs(ancora)
+            print(f"   ParticipantPickerNavigationBar_RightBarButton: name={a['name']!r} "
+                 f"label={a['label']!r} value={a['value']!r} en={a['enabled']} "
+                 "(candidato a contador: 'Criar (N)'? Compare com o numero de contatos "
+                 "marcados NA MAO antes deste probe.)")
+        try:
+            navbars = d.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeNavigationBar")
+        except WebDriverException:
+            navbars = []
+        for nb in navbars[:3]:
+            a = attrs(nb)
+            print(f"   NavigationBar: name={a['name']!r} label={a['label']!r} "
+                 f"value={a['value']!r} (titulo/prompt tambem pode trazer 'N/256')")
+
         # controles (botoes/busca): rotulos de UI, sem dados pessoais
         for tipo in CONTROLES:
             try:

@@ -214,7 +214,7 @@ class RunnerThread:
     def __init__(self, csv_path: str, cfg: AppConfig, log_queue: queue.Queue,
                  on_finish, ddd: str = "", scroll: bool = False,
                  scroll_lists: int = 1, approve: bool = False,
-                 turbo: bool = False, agenda: str = ""):
+                 turbo: bool = False, agenda: str = "", limite: int = 0):
         self._turbo = bool(turbo)
         self._agenda = agenda or ""
         self._csv = csv_path
@@ -225,6 +225,12 @@ class RunnerThread:
         self._scroll = scroll
         self._scroll_lists = st.clamp_listas(scroll_lists)
         self._approve = bool(approve)
+        # Contatos por lista. 0 = nao manda a flag (usa o padrao do runner,
+        # a lista cheia). Existe para permitir o ensaio em escada (5 -> 30 ->
+        # 256) SEM precisar cair no terminal — antes so o terminal alcancava
+        # o teste de 5 contatos; quem abria a estacao ia direto para a lista
+        # cheia, o caminho que nunca tinha rodado (auditoria 2026-09-10).
+        self._limite = int(limite) if limite else 0
         self._proc: subprocess.Popen | None = None
         self.parado_pelo_operador = False
         self._t = threading.Thread(target=self._run, daemon=True)
@@ -263,6 +269,8 @@ class RunnerThread:
             cmd.append("--approve-create")
         if self._ddd and not self._scroll:
             cmd += ["--ddd", self._ddd]
+        if self._limite:
+            cmd += ["--limite-por-lista", str(self._limite)]
         return cmd
 
     def _run(self):
@@ -301,6 +309,11 @@ class OperationView(ctk.CTkScrollableFrame):
         self._ddd_modo_var = ctk.StringVar(value="todos" if not app.cfg.ddds else "selecao")
         self._ddd_extra_var = ctk.StringVar()
         self._listas_var = ctk.StringVar(value=str(st.clamp_listas(app.cfg.scroll_lists)))
+        # Ensaio em escada (5 -> 30 -> lista cheia): nunca persiste — a
+        # estação sempre reabre no "Lista cheia" (o padrão de sempre) para
+        # que ligar "Real" sem pensar nunca dispare menos que o esperado nem
+        # mais; escolher um ensaio menor é decisão consciente a cada abertura.
+        self._ensaio_var = ctk.StringVar(value=st.ENSAIO_SCROLL_PADRAO)
         self._ddd_checks: dict[str, ctk.BooleanVar] = {}
 
         salvos, _ = st.parse_ddds(app.cfg.ddds)
@@ -460,6 +473,19 @@ class OperationView(ctk.CTkScrollableFrame):
                                                 padx=(0, S.SM))
         ui.SecondaryButton(agenda.body, "Escolher…", self._escolher_arquivo,
                            width=120).grid(row=0, column=1)
+
+        # Tamanho do ensaio: o caminho para 5 -> 30 -> lista cheia sem precisar
+        # do terminal (auditoria 2026-09-10 — antes só o terminal alcançava o
+        # teste de 5 contatos, e quem abria a estação ia direto para 256).
+        ensaio = ui.FormField(
+            self._painel_scroll, "Tamanho do ensaio",
+            "Comece pequeno num iPhone novo: 5, depois 30, só depois a lista cheia.")
+        ensaio.grid(row=6, column=0, sticky="w", pady=(S.LG, 0))
+        ctk.CTkSegmentedButton(
+            ensaio.body, values=list(st.PRESETS_ENSAIO_SCROLL.keys()),
+            variable=self._ensaio_var, font=ui.f_corpo(),
+            selected_color=C.AZUL, selected_hover_color=C.AZUL_HOVER,
+        ).grid(row=0, column=0, sticky="w")
 
         # Turbo: nunca persiste — é escolha consciente a cada abertura.
         self._turbo_var = ctk.BooleanVar(value=False)
@@ -837,12 +863,15 @@ class OperationView(ctk.CTkScrollableFrame):
         filtrados, listas = self._contagem()
 
         turbo = fonte == st.Fonte.SCROLL and bool(self._turbo_var.get())
+        ensaio_txt = self._ensaio_var.get() if fonte == st.Fonte.SCROLL else st.ENSAIO_SCROLL_PADRAO
         if execucao == st.Execucao.REAL:
             linhas = st.resumo_confirmacao(fonte, execucao, self._resumo, ddds,
                                            filtrados, listas,
                                            ja_adicionados=self._ja_adicionados())
             if turbo:
                 linhas.append(("Toques", "Turbo: rajada por tela"))
+            if fonte == st.Fonte.SCROLL and ensaio_txt != st.ENSAIO_SCROLL_PADRAO:
+                linhas.append(("Tamanho do ensaio", ensaio_txt))
             dialogo = ui.ConfirmDialog(
                 self._app, "Confirmar criação das listas", linhas,
                 "Durante a execução a estação controla o WhatsApp no iPhone. "
@@ -870,9 +899,11 @@ class OperationView(ctk.CTkScrollableFrame):
         if fonte == st.Fonte.SCROLL:
             self._app.total_listas = listas
             agenda = self._arquivo_var.get() if ddds else ""
+            limite = st.PRESETS_ENSAIO_SCROLL.get(self._ensaio_var.get(), 0)
             self._app.iniciar_execucao("", ddd=st.formatar_ddds(ddds) if agenda else "",
                                        scroll=True, scroll_lists=listas,
-                                       approve=aprova, turbo=turbo, agenda=agenda)
+                                       approve=aprova, turbo=turbo, agenda=agenda,
+                                       limite=limite)
             return
 
         caminho = self._arquivo_var.get()
@@ -1640,13 +1671,13 @@ class StationApp(ctk.CTk):
 
     def iniciar_execucao(self, csv_path: str, ddd: str = "", scroll: bool = False,
                          scroll_lists: int = 1, approve: bool = False,
-                         turbo: bool = False, agenda: str = ""):
+                         turbo: bool = False, agenda: str = "", limite: int = 0):
         self._lista_atual = 0
         self._runner = RunnerThread(
             csv_path=csv_path, cfg=self.cfg, log_queue=self._fila,
             on_finish=lambda codigo: self.after(0, self._ao_terminar, codigo),
             ddd=ddd, scroll=scroll, scroll_lists=scroll_lists, approve=approve,
-            turbo=turbo, agenda=agenda)
+            turbo=turbo, agenda=agenda, limite=limite)
         self._runner.start()
         self.atualizar_indicadores()
 

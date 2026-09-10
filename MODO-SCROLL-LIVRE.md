@@ -148,9 +148,15 @@ qualquer tela desconhecida = parada segura + `inventory-erro.json`.
 
 ## 5. Tempo esperado (a confirmar no primeiro teste)
 
-Por tela (≈ 10–12 contatos): ler ≈ 3–5 s, tocar ≈ 3–4 s, rolar ≈ 1 s.
-Lista de 256 ≈ 22 telas ≈ **3–5 min**. Retomada em listas avançadas (rolar
-até o ponto) soma 1–5 min. Meça no primeiro teste e anote aqui.
+CORRIGIDO pela auditoria de 2026-09-10 (medido no simulador com a faixa de
+chips real, ~5-6 contatos NOVOS por tela por causa da sobreposição de 3
+linhas e da faixa de selecionados): **lista de 256 ≈ 51 telas**, não ~22-30
+como esta seção dizia antes — a conta antiga estava errada em ~70%. Por
+tela: ler ≈ 3–5 s, tocar ≈ 3–4 s, rolar ≈ 1 s (mas ver a tabela da seção 5b:
+com a leitura saudável a conta dá ~3 min; se a varredura do seletor ficar
+lenta — o sintoma do log de 2026-09-09 — pode passar de 20 min ou nem
+terminar). Retomada em listas avançadas (rolar até o ponto) soma 1–5 min.
+Meça no aparelho e anote aqui.
 
 ---
 
@@ -168,7 +174,7 @@ automação de interface. O que existe é cortar chamadas desperdiçadas:
 | Arquivo (CSV/VCF), preset Máximo | 5 por contato + 0,675 s de pausas | ~12 min (mede antes: pausa curta gera "não encontrado" falso) |
 | Scroll Livre até a V14 | ~44 por tela | ~4 min |
 | Scroll Livre agora (padrão) | ~13 por tela | ~1,5 min |
-| Scroll Livre com `--turbo` | ~5 por tela | ~1 min |
+| Scroll Livre com `--turbo` | ~7 por tela, 2 delas varrendo a árvore inteira (~51 telas para 256) | CORRIGIDO 2026-09-10: NÃO confirmado no aparelho — o único dado real é o log de 2026-09-09 (uma varredura sozinha levou 33,6 s e voltou vazia, seguida de socket hang up). Com a varredura saudável a ~0,5 s: ~3 min; se ela ficar lenta, pode passar de 20 min ou nunca terminar. Não prometa "~1 min" antes de medir no aparelho. |
 
 De onde saiu o ganho, sem afrouxar trava nenhuma:
 
@@ -260,7 +266,43 @@ marcado, o botão Iniciar explica o que falta.
 | `nenhuma celula de contato no seletor` | Profundidade da árvore mudou (WhatsApp novo). Rode `probe_picker.py` e mande o resultado. |
 | WDA caiu / `socket hang up` | Igual ao fluxo validado: veja `TRAVOU-EM-OPENING-BROADCAST.md`. |
 | Contato pulado | Compare o total do log com o esperado; homônimos e "sem rótulo" são contados no resumo de cada lista. |
+| `teto de telas atingido` | NÃO é fim de agenda — o filtro de DDD provavelmente é mais restritivo do que o teto previsto suporta. O teto já é elevado automaticamente quando há `--ddd`; se persistir, rode com um DDD só ou aumente `--limite-por-lista`. |
+| `leitura vazia lenta` / `rajada interrompida` | O WDA não respondeu a tempo (o sintoma do log de 2026-09-09). A lista é salva PARCIAL com o que já estava confirmado (código de saída 6) — a próxima rodada continua do contato seguinte automaticamente. Confira no iPhone o número de destinatários da lista criada. |
+
+### Código de saída 6 — lista parcial criada
+
+Desde a auditoria de 2026-09-10, uma interrupção no meio da seleção (rajada
+`--turbo` que morreu no meio, leitura que estourou o tempo, teto de telas)
+NÃO perde mais os toques já confirmados: se houver pelo menos 2 e o seletor
+ainda estiver na tela, a estação clica em "Criar" com o que tem e sai com o
+código 6. O progresso avança exatamente por essa quantidade — nunca mais do
+que o confirmado, nunca menos. Sem isso, uma falha que se repete no mesmo
+ponto (porque depende do tamanho da árvore) fazia a lista de 256 nunca
+fechar.
+
+### Profundidade da árvore depois do 1º contato
+
+A faixa de selecionados afunda a árvore um nível assim que o 1º contato é
+marcado — no modo CSV isso está CONFIRMADO no aparelho. Quando acontece, a
+busca por célula volta **vazia e rápida**, que é indistinguível de "fim da
+agenda" pelo tempo. Por isso a reavaliação de profundidade mora dentro da
+própria leitura (`_ler_celulas`), e não no laço de seleção: no laço ela só
+seria consultada depois de uma rolagem às cegas, e os contatos daquela tela
+eram pulados em silêncio. Vale **uma vez por lista**, com orçamento de 3 s, e
+só dispara quando a busca não achou célula nenhuma — fim de agenda de verdade
+(células achadas, todas fora da área tocável) não paga nada por isso.
+
+**Enquanto não houver um contador de selecionados confirmado no aparelho**
+(item em aberto: nenhum candidato — botão Criar, título da NavigationBar,
+faixa do topo — foi confirmado como contador; ver `probe_picker.py`), uma
+rajada `--turbo` que morre no meio NUNCA é re-tocada (re-tocar desmarca) e os
+toques dessa rajada específica ficam de fora da lista — nem contados, nem
+perdidos: a próxima rodada tenta esses contatos de novo. Por isso o runner
+avisa alto quando `--turbo` vem com `--limite-por-lista` acima de 30: confira
+sempre no iPhone o número de destinatários da lista recém-criada.
 
 Testes locais (sem iPhone): `python3 test_scroll_local.py` — simula o
 seletor (faixa de chips, células parciais, homônimos, convite, contato apagado,
-retomada longe, fim da agenda). 15 casos.
+retomada longe, fim da agenda, rajada interrompida, teto de telas, leitura
+lenta, profundidade que muda depois do 1o chip, e o proprio `main()` criando
+a lista parcial). 54 casos.

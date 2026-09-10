@@ -24,6 +24,18 @@ MIN_DESTINATARIOS = 2       # o WhatsApp nao cria lista com menos que isso
 MAX_LISTAS_RODADA = 36      # teto por rodada no Modo Scroll Livre
 MIN_LISTAS_RODADA = 1
 
+# Escada de ensaio do Modo Scroll Livre (auditoria 2026-09-10): 0 = lista
+# cheia (nao manda --limite-por-lista; e o padrao de sempre, ninguem que ja
+# usava a estacao e afetado). Antes disto so o terminal alcancava o ensaio de
+# 5 contatos — quem abria a estacao ia direto para a lista cheia, o caminho
+# que nunca tinha rodado num iPhone.
+PRESETS_ENSAIO_SCROLL: dict[str, int] = {
+    "Ensaio (5 contatos)": 5,
+    "Ensaio (30 contatos)": 30,
+    f"Lista cheia ({LIMITE_LISTA} contatos)": 0,
+}
+ENSAIO_SCROLL_PADRAO = f"Lista cheia ({LIMITE_LISTA} contatos)"
+
 
 # ── DDDs ─────────────────────────────────────────────────────────────────────
 # Tabela usada so para rotular a interface. O filtro de verdade e o
@@ -487,6 +499,16 @@ def etapa_humana(linha: str) -> str:
         ("fim da lista de contatos", "Fim da agenda."),
         ("lista criada", "Lista criada."),
         ("filtro de area", "Aplicando o filtro de DDD…"),
+        # Auditoria 2026-09-10: desfechos que NAO sao "fim da agenda" — sem
+        # isto o operador leria esses avisos como se a agenda tivesse acabado,
+        # quando na verdade a estação parou por segurança no meio dela.
+        ("leitura vazia lenta", "A tela demorou para responder; conferindo com "
+                                "segurança antes de continuar…"),
+        ("teto de telas atingido", "Chegou ao limite de telas desta lista sem "
+                                   "esgotar a agenda; salvando o que foi confirmado…"),
+        ("rajada interrompida", "O toque em lote foi interrompido; conferindo "
+                                "o que foi confirmado…"),
+        ("criada parcial", "Lista criada com os contatos confirmados até aqui."),
     )
     for chave, frase in tabela:
         if chave in baixa:
@@ -519,6 +541,10 @@ _DESFECHOS: dict[int, Desfecho] = {
                 "Algo fora do previsto apareceu na tela (uma conversa aberta, por "
                 "exemplo) e a estação parou por segurança. Volte o WhatsApp para "
                 "Conversas e tente de novo.", "erro"),
+    6: Desfecho("Lista parcial criada",
+                "A seleção foi interrompida no meio (rede lenta ou toque perdido), "
+                "mas a lista foi criada com os contatos já confirmados. A próxima "
+                "rodada continua automaticamente do contato seguinte.", "atencao"),
 }
 
 _INTERROMPIDO = Desfecho(

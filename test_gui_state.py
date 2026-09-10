@@ -279,6 +279,21 @@ class Progresso(unittest.TestCase):
         self.assertIn("WhatsApp", st.etapa_humana("INFO estado: OPENING_WHATSAPP"))
         self.assertEqual(st.etapa_humana("linha sem etapa"), "")
 
+    def test_paradas_forcadas_nao_leem_como_fim_de_agenda(self):
+        """Auditoria 2026-09-10: teto de telas, leitura lenta e rajada
+        interrompida NAO podem soar como 'Fim da agenda.' — o operador
+        confiaria numa lista mais curta do que devia."""
+        casos = (
+            "WARNING leitura vazia lenta (8.3s) — retentando uma vez",
+            "WARNING teto de telas atingido (5 telas) sem terminar a lista",
+            "ERROR turbo: a rajada morreu no meio (...) — rajada interrompida",
+            "WARNING lista 3 criada PARCIAL: 9 de ate 60 contato(s) pedidos",
+        )
+        for linha in casos:
+            frase = st.etapa_humana(linha)
+            self.assertTrue(frase, linha)
+            self.assertNotEqual(frase, "Fim da agenda.", linha)
+
 
 class Desfechos(unittest.TestCase):
 
@@ -317,6 +332,14 @@ class Desfechos(unittest.TestCase):
     def test_codigo_desconhecido_nao_quebra(self):
         d = st.desfecho_para(77)
         self.assertEqual(d.tom, "erro")
+        self.assertTrue(d.orientacao)
+
+    def test_codigo_6_e_lista_parcial_nao_erro(self):
+        """Auditoria 2026-09-10: o salvamento parcial e sucesso com ressalva
+        (atencao), nunca erro — a lista FOI criada."""
+        d = st.desfecho_para(6)
+        self.assertEqual(d.tom, "atencao")
+        self.assertIn("parcial", d.titulo.lower())
         self.assertTrue(d.orientacao)
 
 
