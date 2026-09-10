@@ -52,23 +52,27 @@ componentes). A automação em si (`spike_ios.py`, `run_ios.py`,
 Testes da interface, sem iPhone: `python3 test_gui_state.py` e
 `python3 test_gui_runner.py`.
 
-## Nome das listas e listas em sequência
+## Listas em sequência (mais de 256 contatos)
 
-Depois do "Criar", o WhatsApp abre a conversa da lista com o título padrão
-("Mensagens"). A estação toca no título, abre as informações e escreve
-**"Lista de transmissão 01"**, "02", … (a numeração segue a ordem das listas;
-`--sem-nome` desliga). Regras: só digita depois de comprovar que saiu da
-conversa (o campo de mensagem nunca é tocado); se algum elemento não aparecer,
-a lista fica com o nome padrão, o inventário da tela é salvo em
-`inventory-nomear.json` e a rodada continua.
+Depois do "Criar", o WhatsApp abre a conversa da lista recém-criada. A estação
+grava o progresso dessa lista e **volta para Conversas** antes de abrir a
+seguinte — nos dois modos. Sem essa volta a segunda lista não achava o "+",
+que não existe dentro de uma conversa. Confirmado no iPhone em 2026-09-09.
 
-Os seletores dessa tela são palpites até serem confirmados no iPhone. Para
-confirmar de uma vez: com a conversa de uma lista aberta, rode
-`python3 probe_nomear.py` e envie os `inventory-nomear-*.json`.
+As listas ficam com o nome padrão do WhatsApp (a nomeação automática foi
+retirada: a tela de informações da lista não expôs os elementos esperados).
+Renomeie no próprio WhatsApp, se quiser.
 
-Em sequência: depois de criar (e nomear), a estação volta para Conversas antes
-de abrir a lista seguinte — nos dois modos. Sem isso a segunda lista não achava
-o "+", que não existe dentro de uma conversa.
+Para validar a sequência no modo lista de contatos sem um CSV de 257 contatos,
+use lotes pequenos **só no teste**:
+
+```bash
+.venv/bin/python run_ios.py --csv contatos.csv --trust-profile --approve-create --limite-por-lista 5 --max-lists 2
+```
+
+Um CSV com 10 contatos vira duas listas de 5 ("Transmissão 001" e "002" no
+progresso). O limite nunca passa de 256 nem fica abaixo de 2; sem a opção,
+a operação real segue em lotes de 256.
 
 ## Comece por aqui
 

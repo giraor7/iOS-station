@@ -3,6 +3,8 @@ via Appium XCUITest no Mac. Espelho do run_android.py (que ja rodou de verdade).
 
 Fluxo: CSV -> E.164 (libphonenumber) -> dedupe -> lotes de ate 256 ->
 "Transmissão 001, 002, ..." com ritmo configuravel e RETOMADA.
+Listas em sequencia: depois de cada "Criar" a estacao volta para Conversas
+antes de abrir a proxima (o progresso da lista e gravado antes da volta).
 
 Seguranca: nunca envia mensagem, nunca abre conversa, nunca toca no compositor;
 para em UI desconhecida; cria listas SOMENTE com --approve-create; o progresso
@@ -60,6 +62,14 @@ def num_hash(e164: str) -> str:
     return hashlib.sha256(e164.encode()).hexdigest()[:16]
 
 
+def limite_de_lote(valor: int) -> int:
+    """Tamanho do lote: nunca acima de 256 (regra do WhatsApp) nem abaixo de 2.
+    Valores <= 0 significam "o padrao"."""
+    if valor is None or valor <= 0:
+        return BROADCAST_LIMIT
+    return max(MIN_RECIPIENTS, min(valor, BROADCAST_LIMIT))
+
+
 class Progress:
     """Retomada por lote. Guarda apenas hash do numero + desfecho.
 
@@ -115,8 +125,9 @@ def main() -> int:
     ap.add_argument("--pace-lists", type=float, default=30.0,
                     help="pausa media entre listas, em segundos")
     ap.add_argument("--trust-profile", action="store_true")
-    ap.add_argument("--sem-nome", action="store_true",
-                    help="nao dar nome as listas (padrao: 'Lista de transmissão NN')")
+    ap.add_argument("--limite-por-lista", type=int, default=BROADCAST_LIMIT,
+                    help="SO PARA TESTE: lotes menores (ex.: 5) para validar listas em "
+                         "sequencia com um CSV pequeno. Nunca passa de 256 nem fica abaixo de 2")
     ap.add_argument("--speed", type=float, default=1.0,
                     help="velocidade das pausas internas: 1.0=seguro, 0.6=rapido, 0.4=turbo (experimental)")
     # filtros de area (opcionais) — mesmos do Android
@@ -155,9 +166,13 @@ def main() -> int:
             log.info("  (%d internacionais removidos; use --incluir-internacional p/ manter)", intl)
         if desc and not args.incluir_desconhecido:
             log.info("  (%d com DDD desconhecido removidos; use --incluir-desconhecido)", desc)
-    lotes = batching.batch(nums)
+    limite = limite_de_lote(args.limite_por_lista)
+    if limite != BROADCAST_LIMIT:
+        log.warning("TESTE: lotes de %d contatos (--limite-por-lista); a operacao real usa %d",
+                    limite, BROADCAST_LIMIT)
+    lotes = batching.batch(nums, limit=limite)
     log.info("CSV: %d linha(s) -> %d numero(s) validos/unicos -> %d lista(s) de ate %d",
-             len(contatos), len(nums), len(lotes), BROADCAST_LIMIT)
+             len(contatos), len(nums), len(lotes), limite)
     for i, lote in enumerate(lotes, 1):
         log.info("  %s: %d contatos", batching.label_for(i), len(lote))
 
@@ -219,8 +234,6 @@ def main() -> int:
                 spike.search_and_select(nc.e164, nc.name or None, label=f"c{j}")
                 pace_sleep(args.pace, j)
 
-            if not args.sem_nome:
-                spike.nome_lista = f"Lista de transmissão {i:02d}"
             spike.finish(args.approve_create)
             concluida = args.approve_create and spike.state == State.COMPLETED
             resultados = [

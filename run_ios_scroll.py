@@ -831,8 +831,6 @@ def main() -> int:
     ap.add_argument("--agenda", default="",
                     help="VCF ou CSV exportado da agenda, usado so para o filtro de DDD")
     ap.add_argument("--region", default="BR")
-    ap.add_argument("--sem-nome", action="store_true",
-                    help="nao dar nome as listas (padrao: 'Lista de transmissão NN')")
     ap.add_argument("--turbo", action="store_true",
                     help="toca todas as celulas de cada tela numa unica requisicao "
                          "(rajada W3C). Ligue SO depois do teste de 5 contatos passar")
@@ -929,8 +927,6 @@ def main() -> int:
                 sp.cancelar_seletor()
                 break
 
-            if not args.sem_nome:
-                sp.nome_lista = f"Lista de transmissão {numero_lista:02d}"
             sp.finish(approve_create=True)     # so clica se "Criar" estiver habilitado
             criadas += 1
             prog.registrar_lista(qtd, sp.ordem[0][0], sp.ordem[-1][0], sp.ordem[-1][1])
