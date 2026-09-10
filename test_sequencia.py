@@ -1,11 +1,14 @@
-"""Listas em sequencia no modo lista de contatos (CSV) — sem iPhone.
+"""Listas em sequencia e sessao em varios dias, no modo lista de contatos (CSV)
+— sem iPhone.
 
 O que precisa valer, aconteca o que acontecer na tela:
   * depois de cada lista criada, a estacao volta para Conversas ANTES de
     abrir a proxima;
   * o progresso da lista e gravado antes da volta (se a volta falhar, a lista
     criada nao e refeita na retomada);
-  * uma lista ja concluida e pulada na retomada;
+  * quem ja esta numa lista criada fica de fora da rodada seguinte (com o
+    mesmo arquivo ou outro); registros anteriores nunca sao sobrescritos;
+  * so conta como criada depois do toque em "Criar";
   * o lote nunca passa de 256 nem fica abaixo de 2.
 
   python3 test_sequencia.py
@@ -22,6 +25,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import run_ios  # noqa: E402
+import sessao  # noqa: E402
 import spike_ios  # noqa: E402
 from ios_selectors import BASELINE  # noqa: E402
 
@@ -118,6 +122,33 @@ class VoltarParaConversas(unittest.TestCase):
         self.assertEqual(tela.backs, 0)
 
 
+class ListaCriadaSoDepoisDoCriar(unittest.TestCase):
+    """finish() com menos de 2 selecionados termina COMPLETED sem criar nada:
+    o runner nao pode gravar isso como lista criada."""
+
+    def test_menos_de_dois_nao_marca_criada(self):
+        sp = spike_ios.IosSpike(Driver(Tela()), BASELINE)
+        sp.wait_for = lambda chave, timeout=0, required=True: None
+        sp.results = [{"outcome": "selected"}, {"outcome": "not_found"}]
+        sp.finish(approve_create=True)
+        self.assertEqual(sp.state, spike_ios.State.COMPLETED)
+        self.assertFalse(sp.lista_criada)
+
+    def test_toque_em_criar_marca_criada(self):
+        tela = Tela()
+        tela.estado = "picker"
+        sp = spike(tela)
+        sp.wait_for = lambda chave, timeout=0, required=True: El(tela, chave) if chave == "create_button" else None
+        sp.results = [{"outcome": "selected"}, {"outcome": "selected"}]
+        sp.finish(approve_create=True)
+        self.assertTrue(sp.lista_criada)
+        sp2 = spike(Tela())
+        sp2.results = [{"outcome": "selected"}, {"outcome": "selected"}]
+        sp2.wait_for = lambda chave, timeout=0, required=True: El(Tela(), chave)
+        sp2.finish(approve_create=False)          # simulacao: nao toca em Criar
+        self.assertFalse(sp2.lista_criada)
+
+
 # ---------------- parte 2: run_ios.main() com um IosSpike falso ----------------
 
 CHAMADAS: list[tuple] = []
@@ -126,6 +157,8 @@ CHAMADAS: list[tuple] = []
 class SpikeFalso:
     """Registra a ordem das chamadas; nao toca em nada."""
     instancias = 0
+    contador = 0                 # contatos procurados na rodada (global)
+    nao_encontrados: set = set()  # posicoes (1-based, na rodada) que saem 'not_found'
     volta_falha = False
 
     def __init__(self, driver, profile, speed=1.0):
@@ -134,6 +167,7 @@ class SpikeFalso:
         self.state = spike_ios.State.IDLE
         self.results = []
         self.verify_selection = True
+        self.lista_criada = False
 
     def transition(self, s):
         self.state = s
@@ -142,11 +176,16 @@ class SpikeFalso:
         CHAMADAS.append(("abrir", self.n))
 
     def search_and_select(self, e164, name=None, label=""):
+        SpikeFalso.contador += 1
         CHAMADAS.append(("selecionar", self.n))
-        self.results.append({"outcome": "selected"})
+        achou = SpikeFalso.contador not in SpikeFalso.nao_encontrados
+        self.results.append({"outcome": "selected" if achou else "not_found"})
 
     def finish(self, approve_create):
-        CHAMADAS.append(("criar" if approve_create else "parar", self.n))
+        selecionados = sum(1 for r in self.results if r["outcome"] == "selected")
+        criar = approve_create and selecionados >= 2
+        CHAMADAS.append(("criar" if criar else "parar", self.n))
+        self.lista_criada = criar
         self.state = spike_ios.State.COMPLETED
 
     def voltar_para_conversas(self):
@@ -160,8 +199,8 @@ class DriverFalso:
         pass
 
 
-def csv_de(n, pasta):
-    p = os.path.join(pasta, "contatos.csv")
+def csv_de(n, pasta, nome="contatos.csv"):
+    p = os.path.join(pasta, nome)
     with open(p, "w", encoding="utf-8") as f:
         f.write("name,phone\n")
         for i in range(1, n + 1):
@@ -172,6 +211,7 @@ def csv_de(n, pasta):
 def rodar(argv):
     CHAMADAS.clear()
     SpikeFalso.instancias = 0
+    SpikeFalso.contador = 0
     run_ios.IosSpike = SpikeFalso
     run_ios.build_driver = lambda server, bundle=None: DriverFalso()
     run_ios.exigir_appium = lambda server: True
@@ -195,9 +235,10 @@ class ListasEmSequencia(unittest.TestCase):
         self.csv = csv_de(10, self.pasta)
         self.prog = os.path.join(self.pasta, "progress.json")
         SpikeFalso.volta_falha = False
+        SpikeFalso.nao_encontrados = set()
 
-    def comuns(self, *extras):
-        return ["--csv", self.csv, "--trust-profile", "--progress", self.prog,
+    def comuns(self, *extras, csv=None):
+        return ["--csv", csv or self.csv, "--trust-profile", "--progress", self.prog,
                 "--pace", "0", "--pace-lists", "0", "--limite-por-lista", "5", *extras]
 
     def test_duas_listas_volta_para_conversas_entre_elas(self):
@@ -207,9 +248,9 @@ class ListasEmSequencia(unittest.TestCase):
                     + [("abrir", 2)] + [("selecionar", 2)] * 5 + [("criar", 2), ("voltar", 2)])
         self.assertEqual(CHAMADAS, esperado)
         listas = progresso(self.prog)
-        self.assertTrue(listas["Transmissão 001"]["completed"])
-        self.assertTrue(listas["Transmissão 002"]["completed"])
-        self.assertEqual(len(listas["Transmissão 002"]["results"]), 5)
+        self.assertEqual(len(listas), 2)
+        self.assertTrue(all(e["completed"] for e in listas.values()))
+        self.assertTrue(all(e["csv"] == "contatos.csv" and e["quando"] for e in listas.values()))
 
     def test_max_lists_para_depois_da_primeira(self):
         rc = rodar(self.comuns("--approve-create", "--max-lists", "1"))
@@ -217,16 +258,34 @@ class ListasEmSequencia(unittest.TestCase):
         self.assertEqual(SpikeFalso.instancias, 1)
         self.assertIn(("voltar", 1), CHAMADAS)     # volta mesmo sendo a ultima
         listas = progresso(self.prog)
+        self.assertEqual(len(listas), 1)
         self.assertTrue(listas["Transmissão 001"]["completed"])
-        self.assertNotIn("Transmissão 002", listas)
 
-    def test_retomada_pula_lista_concluida(self):
+    def test_dia_seguinte_so_os_restantes_viram_lista(self):
+        """Dia 1: 5 de 10 entram. Dia 2, MESMO arquivo: so os outros 5 sao
+        procurados, o registro do dia 1 continua la e ninguem e repetido."""
         rodar(self.comuns("--approve-create", "--max-lists", "1"))
         rc = rodar(self.comuns("--approve-create"))
         self.assertEqual(rc, 0)
-        self.assertEqual(SpikeFalso.instancias, 1)          # so a 002
-        self.assertEqual(CHAMADAS[0], ("abrir", 1))
-        self.assertTrue(progresso(self.prog)["Transmissão 002"]["completed"])
+        self.assertEqual(SpikeFalso.instancias, 1)          # so uma lista: os 5 restantes
+        self.assertEqual(CHAMADAS.count(("selecionar", 1)), 5)
+        listas = progresso(self.prog)
+        self.assertEqual(len(listas), 2)                    # nada sobrescrito
+        hashes = [r["hash"] for e in listas.values() for r in e["results"]]
+        self.assertEqual(len(hashes), 10)
+        self.assertEqual(len(set(hashes)), 10)              # ninguem em duas listas
+        # terceiro dia: nao ha mais o que criar
+        rc = rodar(self.comuns("--approve-create"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(SpikeFalso.instancias, 0)
+
+    def test_arquivo_novo_com_contatos_a_mais(self):
+        """O CSV do dia 2 tem os 10 de antes mais 3 novos: so os 3 novos e os que
+        faltavam sao procurados."""
+        rodar(self.comuns("--approve-create", "--max-lists", "1"))     # 5 adicionados
+        maior = csv_de(13, self.pasta, "contatos2.csv")
+        rodar(self.comuns("--approve-create", csv=maior))
+        self.assertEqual(CHAMADAS.count(("selecionar", 1)) + CHAMADAS.count(("selecionar", 2)), 8)
 
     def test_progresso_gravado_antes_da_volta(self):
         SpikeFalso.volta_falha = True
@@ -234,15 +293,59 @@ class ListasEmSequencia(unittest.TestCase):
         self.assertEqual(rc, 4)                              # UI_CHANGED
         listas = progresso(self.prog)
         self.assertTrue(listas["Transmissão 001"]["completed"])   # criada: nao refazer
-        self.assertNotIn("Transmissão 002", listas)
+        self.assertEqual(len(listas), 1)
         self.assertNotIn(("abrir", 2), CHAMADAS)
 
-    def test_sem_approve_nao_cria_e_nao_volta(self):
+    def test_sem_approve_nao_cria_nao_volta_e_nao_marca_ninguem(self):
         rc = rodar(self.comuns())
         self.assertEqual(rc, 0)
         self.assertNotIn(("criar", 1), CHAMADAS)
         self.assertNotIn(("voltar", 1), CHAMADAS)
         self.assertFalse(progresso(self.prog)["Transmissão 001"]["completed"])
+        rodar(self.comuns())                                  # simulacao de novo: os 10 continuam la
+        self.assertEqual(CHAMADAS.count(("selecionar", 1)) + CHAMADAS.count(("selecionar", 2)), 10)
+
+    def test_menos_de_dois_selecionados_nao_e_lista_criada(self):
+        """Lote 2 com 4 'nao encontrado': Criar nao e tocado, o registro fica
+        completed=False, nao ha volta para Conversas, e no dia seguinte os 4
+        ficam de fora (ou voltam com --repetir-nao-encontrados)."""
+        SpikeFalso.nao_encontrados = {6, 7, 8, 9}
+        rc = rodar(self.comuns("--approve-create"))
+        self.assertEqual(rc, 0)
+        self.assertIn(("parar", 2), CHAMADAS)
+        self.assertNotIn(("voltar", 2), CHAMADAS)
+        listas = progresso(self.prog)
+        self.assertEqual([e["completed"] for e in listas.values()], [True, False])
+        # dia seguinte: sobra 1 restante (o contato 10) -> lote pequeno, pulado
+        rodar(self.comuns("--approve-create"))
+        self.assertEqual(SpikeFalso.instancias, 0)
+        # pedindo para repetir: os 4 + o 10 voltam a ser procurados
+        SpikeFalso.nao_encontrados = set()
+        rodar(self.comuns("--approve-create", "--repetir-nao-encontrados"))
+        self.assertEqual(CHAMADAS.count(("selecionar", 1)), 5)
+        self.assertIn(("criar", 1), CHAMADAS)
+
+    def test_exportar_grava_csvs_e_nao_toca_no_iphone(self):
+        SpikeFalso.nao_encontrados = {3}
+        rodar(self.comuns("--approve-create", "--max-lists", "1"))     # 4 adicionados, 1 nao encontrado
+        rc = rodar(self.comuns("--approve-create", "--exportar"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(SpikeFalso.instancias, 0)
+        base = os.path.join(self.pasta, "contatos")
+        with open(base + ".restantes.csv", encoding="utf-8") as f:
+            self.assertEqual(len(f.read().splitlines()), 1 + 5)
+        with open(base + ".adicionados.csv", encoding="utf-8") as f:
+            self.assertEqual(len(f.read().splitlines()), 1 + 4)
+        with open(base + ".nao-adicionados.csv", encoding="utf-8") as f:
+            linhas = f.read().splitlines()
+        self.assertEqual(linhas[0], "name,phone,motivo")
+        self.assertEqual(len(linhas), 2)
+        self.assertTrue(linhas[1].endswith(",nao_encontrado"))
+        # o CSV de restantes exportado, importado no dia seguinte, gera 1 lista com os 5
+        rc = rodar(self.comuns("--approve-create", csv=base + ".restantes.csv"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(CHAMADAS.count(("selecionar", 1)), 5)
+        self.assertIn(("criar", 1), CHAMADAS)
 
 
 class LimiteDeLote(unittest.TestCase):

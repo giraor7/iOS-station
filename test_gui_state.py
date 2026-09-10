@@ -355,5 +355,61 @@ class Confirmacao(unittest.TestCase):
         self.assertNotIn("0", linhas["Contatos"])
 
 
+class Sessao(unittest.TestCase):
+    """A tela desconta quem ja esta em listas criadas — a mesma conta do runner."""
+
+    def _contatos(self, n):
+        import batching
+        return [batching.NormalizedContact(f"+55219987654{i:02d}", f"C{i}") for i in range(1, n + 1)]
+
+    def _progresso(self, pasta, hashes_ok, hashes_nf=()):
+        import json, os
+        import sessao
+        p = os.path.join(pasta, "progress.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"lists": {"Transmissão 001": {"completed": True, "results":
+                       [{"hash": h, "outcome": "selected"} for h in hashes_ok]
+                       + [{"hash": h, "outcome": "not_found"} for h in hashes_nf]}}}, f)
+        return p
+
+    def test_desconta_adicionados_e_nao_encontrados(self):
+        import tempfile
+        import sessao
+        cs = self._contatos(6)
+        p = self._progresso(tempfile.mkdtemp(),
+                            [sessao.hash_numero(cs[0].e164), sessao.hash_numero(cs[1].e164)],
+                            [sessao.hash_numero(cs[2].e164)])
+        ses = st.descontar_sessao(cs, p)
+        self.assertEqual(len(ses.adicionados), 2)
+        self.assertEqual(len(ses.nao_adicionados), 1)
+        self.assertEqual(len(ses.restantes), 3)
+        self.assertEqual(st.contar_listas(len(ses.restantes)), 1)
+
+    def test_sem_progresso_nada_e_descontado(self):
+        cs = self._contatos(3)
+        ses = st.descontar_sessao(cs, "/caminho/que/nao/existe.json")
+        self.assertEqual(len(ses.restantes), 3)
+        self.assertEqual(ses.adicionados, [])
+
+    def test_confirmacao_mostra_ja_adicionados(self):
+        r = st.ResumoArquivo(caminho="/x/contatos.csv", tipo="CSV", validos=10)
+        linhas = dict(st.resumo_confirmacao(st.Fonte.ARQUIVO, st.Execucao.REAL, r, [],
+                                            7, 1, ja_adicionados=3))
+        self.assertEqual(linhas["Contatos"], "7 restantes")
+        self.assertEqual(linhas["Já em listas anteriores"], "3 (ficam de fora)")
+        sem = dict(st.resumo_confirmacao(st.Fonte.ARQUIVO, st.Execucao.REAL, r, [], 10, 1))
+        self.assertEqual(sem["Contatos"], "10")
+        self.assertNotIn("Já em listas anteriores", sem)
+
+    def test_prontidao_avisa_quando_todos_ja_foram_adicionados(self):
+        amb = st.Ambiente(verificado=True, iphone_count=1, idevice_ok=True, appium_ok=True)
+        r = st.ResumoArquivo(caminho="/x/contatos.csv", tipo="CSV", validos=5)
+        itens = {i.chave: i for i in st.itens_prontidao(amb, st.Fonte.ARQUIVO, r, 0,
+                                                        ja_adicionados=5)}
+        self.assertEqual(itens["fonte"].estado, st.Estado.FALTA)
+        self.assertIn("já", itens["fonte"].detalhe)
+        self.assertIn("listas criadas", itens["fonte"].detalhe)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

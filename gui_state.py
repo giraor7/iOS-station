@@ -246,6 +246,18 @@ def lotes_pequenos(quantidade: int) -> int:
     return resto if 0 < resto < MIN_DESTINATARIOS else 0
 
 
+PROGRESSO_PADRAO = "progress.ios.local.json"   # o mesmo que o run_ios.py usa
+
+
+def descontar_sessao(contatos: list, progresso_path: str):
+    """Separa os contatos (ja filtrados) em adicionados / restantes / nao
+    adicionados, lendo o progresso do run_ios.py. Nunca escreve. E o que faz a
+    tela mostrar 'ja em listas' e planejar so os restantes — a mesma conta que
+    o runner faz (sessao.resumir)."""
+    import sessao
+    return sessao.resumir(contatos, sessao.carregar_progresso(progresso_path))
+
+
 # ── Prontidao da estacao ─────────────────────────────────────────────────────
 
 class Estado(str, Enum):
@@ -281,7 +293,7 @@ class Ambiente:
 
 
 def itens_prontidao(amb: Ambiente, fonte: Fonte, resumo: ResumoArquivo | None,
-                    listas_previstas: int) -> list[ItemProntidao]:
+                    listas_previstas: int, ja_adicionados: int = 0) -> list[ItemProntidao]:
     """Checklist da Etapa 1. Nunca esconde o motivo: cada item que falta diz o
     que fazer para resolver."""
     itens: list[ItemProntidao] = []
@@ -353,6 +365,13 @@ def itens_prontidao(amb: Ambiente, fonte: Fonte, resumo: ResumoArquivo | None,
         itens.append(ItemProntidao(
             "fonte", "Fonte de contatos", Estado.FALTA,
             f"Não consegui ler {resumo.nome_arquivo}.", resumo.erro))
+    elif listas_previstas == 0 and ja_adicionados:
+        itens.append(ItemProntidao(
+            "fonte", "Fonte de contatos", Estado.FALTA,
+            f"Todos os {ja_adicionados} contatos deste arquivo (no filtro atual) já "
+            "estão em listas criadas.",
+            "Escolha outro arquivo ou outros DDDs. Para recomeçar do zero, apague "
+            f"{PROGRESSO_PADRAO} na pasta da estação."))
     elif listas_previstas == 0:
         itens.append(ItemProntidao(
             "fonte", "Fonte de contatos", Estado.FALTA,
@@ -382,7 +401,7 @@ def pode_iniciar(itens: list[ItemProntidao], executando: bool) -> tuple[bool, st
 
 def resumo_confirmacao(fonte: Fonte, execucao: Execucao, resumo: ResumoArquivo | None,
                        ddds: list[str], contatos_filtrados: int,
-                       listas: int) -> list[tuple[str, str]]:
+                       listas: int, ja_adicionados: int = 0) -> list[tuple[str, str]]:
     """Linhas (rotulo, valor) da caixa de confirmacao. So dados reais: o que a
     estacao nao sabe aparece como '—', nunca como numero inventado."""
     linhas: list[tuple[str, str]] = []
@@ -393,7 +412,11 @@ def resumo_confirmacao(fonte: Fonte, execucao: Execucao, resumo: ResumoArquivo |
         linhas.append(("Fonte", f"Arquivo {resumo.tipo} · {resumo.nome_arquivo}"
                        if resumo and resumo.caminho else "Arquivo"))
         linhas.append(("Filtro de DDD", descrever_ddds(ddds)))
-        linhas.append(("Contatos", f"{contatos_filtrados:,}".replace(",", ".")))
+        linhas.append(("Contatos", f"{contatos_filtrados:,}".replace(",", ".")
+                       + (" restantes" if ja_adicionados else "")))
+        if ja_adicionados:
+            linhas.append(("Já em listas anteriores",
+                           f"{ja_adicionados:,}".replace(",", ".") + " (ficam de fora)"))
     elif ddds:
         linhas.append(("Fonte", "Modo Scroll Livre, filtrado pela agenda"
                        + (f" ({resumo.nome_arquivo})" if resumo and resumo.caminho else "")))

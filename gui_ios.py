@@ -288,6 +288,7 @@ class OperationView(ctk.CTkScrollableFrame):
         self.grid_columnconfigure(0, weight=1)
 
         self._resumo: st.ResumoArquivo | None = None
+        self._sessao = None          # sessao.Sessao do arquivo atual (ja em listas / restantes)
         self._executando = False
         self._itens_prontidao: list[st.ItemProntidao] = []
 
@@ -377,6 +378,8 @@ class OperationView(ctk.CTkScrollableFrame):
         self._entrada_arquivo.grid(row=0, column=0, sticky="ew", padx=(0, S.SM))
         ui.SecondaryButton(campo.body, "Escolher…", self._escolher_arquivo,
                            width=120).grid(row=0, column=1)
+        ui.SecondaryButton(campo.body, "Exportar restantes…", self._exportar_restantes,
+                           width=170).grid(row=0, column=2, padx=(S.SM, 0))
 
         self._resumo_frame = ctk.CTkFrame(self._painel_arquivo, fg_color=C.SUPERFICIE_2,
                                           corner_radius=ui.RAIO_PEQ)
@@ -388,6 +391,7 @@ class OperationView(ctk.CTkScrollableFrame):
                 ("validos", "Números válidos"),
                 ("descartados", "Inválidos ou repetidos"),
                 ("filtrados", "Depois do filtro"),
+                ("adicionados", "Já em listas"),
                 ("listas", "Listas planejadas"))):
             bloco = ctk.CTkFrame(self._resumo_frame, fg_color="transparent")
             self._tiles_frames.append(bloco)
@@ -401,7 +405,7 @@ class OperationView(ctk.CTkScrollableFrame):
             self._resumo_frame, text="Escolha um arquivo para ver o resumo.",
             font=ui.f_apoio(), text_color=C.TEXTO_3, anchor="w", justify="left",
             wraplength=620)
-        self._grid_tiles(4)
+        self._grid_tiles(3)
 
         # ---- painel do modo scroll ----
         self._painel_scroll = ctk.CTkFrame(card.body, fg_color="transparent")
@@ -702,7 +706,43 @@ class OperationView(ctk.CTkScrollableFrame):
             return 0, 0
         ddds, _ = self._ddds_escolhidos()
         filtrados = st.aplicar_filtro_ddd(self._resumo.contatos, ddds)
-        return len(filtrados), st.contar_listas(len(filtrados))
+        # Quem ja esta numa lista criada fica de fora — a mesma conta do runner.
+        self._sessao = st.descontar_sessao(filtrados, self._progresso_path())
+        restantes = len(self._sessao.restantes)
+        return restantes, st.contar_listas(restantes)
+
+    def _progresso_path(self) -> str:
+        return str(Path(__file__).parent / st.PROGRESSO_PADRAO)
+
+    def _ja_adicionados(self) -> int:
+        if self._fonte_var.get() != st.Fonte.ARQUIVO.value or self._sessao is None:
+            return 0
+        return len(self._sessao.adicionados)
+
+    def _exportar_restantes(self):
+        """Grava, ao lado do arquivo importado, os CSVs de restantes, adicionados e
+        nao adicionados desta sessao (respeitando o filtro de DDD). Nao toca no
+        iPhone nem no progresso."""
+        if not self._resumo or not self._resumo.ok:
+            self._nota_resumo.configure(text="Escolha um arquivo primeiro.",
+                                        text_color=C.AMBAR)
+            return
+        ddds, _ = self._ddds_escolhidos()
+        filtrados = st.aplicar_filtro_ddd(self._resumo.contatos, ddds)
+        ses = st.descontar_sessao(filtrados, self._progresso_path())
+        try:
+            import sessao
+            saidas = sessao.exportar(self._resumo.caminho, ses)
+        except Exception as exc:
+            self._nota_resumo.configure(text=f"Não consegui exportar: {exc}",
+                                        text_color=C.VERMELHO)
+            return
+        nomes = ", ".join(Path(p).name for p in saidas.values())
+        self._nota_resumo.configure(
+            text=(f"Exportado na pasta do arquivo: {nomes} — {len(ses.restantes)} "
+                  f"restantes, {len(ses.adicionados)} já em listas, "
+                  f"{len(ses.nao_adicionados)} não adicionados."),
+            text_color=C.TEXTO_2)
 
     def _atualizar(self):
         fonte = st.Fonte(self._fonte_var.get())
@@ -718,7 +758,8 @@ class OperationView(ctk.CTkScrollableFrame):
 
         amb = self._app.ambiente
         amb.wda_bundle = self._app.cfg.wda_bundle
-        self._itens_prontidao = st.itens_prontidao(amb, fonte, self._resumo, listas)
+        self._itens_prontidao = st.itens_prontidao(amb, fonte, self._resumo, listas,
+                                                   ja_adicionados=self._ja_adicionados())
         for item in self._itens_prontidao:
             alvo = self._prontidao.get(item.chave)
             if alvo:
@@ -762,13 +803,26 @@ class OperationView(ctk.CTkScrollableFrame):
         self._tiles["descartados"].configure(
             text=fmt(r.invalidos + r.duplicados),
             text_color=C.AMBAR if (r.invalidos + r.duplicados) else C.TEXTO)
+        # `filtrados` aqui sao os RESTANTES (depois do filtro e da sessao).
+        ses = self._sessao
+        adicionados = len(ses.adicionados) if ses else 0
+        nao_adic = len(ses.nao_adicionados) if ses else 0
+        apos_filtro = filtrados + adicionados + nao_adic
         self._tiles["filtrados"].configure(
-            text=fmt(filtrados), text_color=C.TEXTO if filtrados else C.AMBAR)
+            text=fmt(apos_filtro), text_color=C.TEXTO if apos_filtro else C.AMBAR)
+        self._tiles["adicionados"].configure(
+            text=fmt(adicionados), text_color=C.TEXTO if adicionados else C.TEXTO_3)
         self._tiles["listas"].configure(
             text=str(listas), text_color=C.TEXTO if listas else C.AMBAR)
         pequeno = st.lotes_pequenos(filtrados)
         nota = (f"{r.tipo} · {r.nome_arquivo} · {st.descrever_ddds(ddds)} · "
                 f"{r.invalidos} inválido(s) e {r.duplicados} repetido(s) descartados.")
+        if adicionados or nao_adic:
+            nota += (f" Sessão: {fmt(adicionados)} já em listas criadas e "
+                     f"{fmt(filtrados)} restantes")
+            if nao_adic:
+                nota += f"; {fmt(nao_adic)} não encontrado(s) antes ficam de fora"
+            nota += "."
         if pequeno:
             nota += (f" A última lista ficaria com {pequeno} contato e o WhatsApp "
                      f"exige {st.MIN_DESTINATARIOS}: ela será pulada.")
@@ -785,7 +839,8 @@ class OperationView(ctk.CTkScrollableFrame):
         turbo = fonte == st.Fonte.SCROLL and bool(self._turbo_var.get())
         if execucao == st.Execucao.REAL:
             linhas = st.resumo_confirmacao(fonte, execucao, self._resumo, ddds,
-                                           filtrados, listas)
+                                           filtrados, listas,
+                                           ja_adicionados=self._ja_adicionados())
             if turbo:
                 linhas.append(("Toques", "Turbo: rajada por tela"))
             dialogo = ui.ConfirmDialog(

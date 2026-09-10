@@ -74,6 +74,33 @@ Um CSV com 10 contatos vira duas listas de 5 ("Transmissão 001" e "002" no
 progresso). O limite nunca passa de 256 nem fica abaixo de 2; sem a opção,
 a operação real segue em lotes de 256.
 
+## Dividir a criação em dias (sessão)
+
+O progresso (`progress.ios.local.json`, só hashes) guarda todo contato que
+entrou numa lista **criada**. Em qualquer rodada seguinte, com o mesmo
+arquivo ou com outro, esses contatos ficam de fora sozinhos e só os
+restantes viram listas novas. Ou seja: para continuar amanhã, basta importar
+o mesmo CSV de novo. A tela mostra "Já em listas" e planeja só os restantes.
+
+Contatos que saíram como *não encontrado* ou *ambíguo* também ficam de fora
+por padrão (cada um custa ~3 s para falhar de novo); `--repetir-nao-encontrados`
+tenta de novo.
+
+Para ter os arquivos em mãos (botão **Exportar restantes…** na tela, ou):
+
+```bash
+.venv/bin/python run_ios.py --csv contatos.csv --exportar
+```
+
+Grava, ao lado do CSV importado e sem tocar no iPhone: `contatos.restantes.csv`
+(o que falta), `contatos.adicionados.csv` (já em listas) e, se houver,
+`contatos.nao-adicionados.csv` (com a coluna `motivo`). Os três aceitam o
+filtro de DDD da linha de comando e são importáveis de volta. Ficam só no Mac,
+como o próprio CSV.
+
+Uma lista só conta como criada depois do toque em "Criar": simulação e lista
+interrompida não marcam ninguém como adicionado.
+
 ## Comece por aqui
 
 ```bash

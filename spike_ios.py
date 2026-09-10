@@ -137,6 +137,10 @@ class IosSpike:
         # (elementResponseAttributes). None = ainda nao se sabe se o driver honra.
         self._attrs_ok: bool | None = None
         self._rotulos_celulas: list | None = None
+        # True somente depois do toque em "Criar" (finish). E isto que o runner
+        # grava como lista concluida — nao o estado COMPLETED, que tambem e
+        # usado quando nao havia o que criar (menos de 2 selecionados).
+        self.lista_criada = False
 
     # ---------------- infra ----------------
 
@@ -845,6 +849,7 @@ class IosSpike:
 
         self.transition(State.SAVING)
         btn.click()
+        self.lista_criada = True
         self.settle()
         # Nao confirmamos nada alem da criacao: nao tocamos em compositor/envio.
         # (O WhatsApp abre a conversa da lista; quem chama decide quando

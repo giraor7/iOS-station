@@ -5,6 +5,8 @@ Fluxo: CSV -> E.164 (libphonenumber) -> dedupe -> lotes de ate 256 ->
 "Transmissão 001, 002, ..." com ritmo configuravel e RETOMADA.
 Listas em sequencia: depois de cada "Criar" a estacao volta para Conversas
 antes de abrir a proxima (o progresso da lista e gravado antes da volta).
+Sessao em varios dias: quem ja esta numa lista criada (hash no progresso)
+fica de fora automaticamente; so os restantes viram listas novas.
 
 Seguranca: nunca envia mensagem, nunca abre conversa, nunca toca no compositor;
 para em UI desconhecida; cria listas SOMENTE com --approve-create; o progresso
@@ -17,20 +19,22 @@ Uso:
   python3 run_ios.py --csv contatos.csv --dry-run
   python3 run_ios.py --csv contatos.csv --wa-version <v> \
       --approve-create --max-lists 1
+  python3 run_ios.py --csv contatos.csv --exportar     # CSVs de restantes/adicionados
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import os
 import sys
 import time
+from datetime import datetime
 
 import batching
 import regions
+import sessao
 from ios_selectors import BASELINE, profile_for_version
 from spike_ios import exigir_appium
 from spike_ios import (BROADCAST_LIMIT, MIN_RECIPIENTS, IosSpike, State,
@@ -58,8 +62,7 @@ def pace_sleep(seconds: float, seed: int) -> None:
     time.sleep(seconds * (0.75 + 0.5 * jitter))
 
 
-def num_hash(e164: str) -> str:
-    return hashlib.sha256(e164.encode()).hexdigest()[:16]
+num_hash = sessao.hash_numero   # uma unica definicao (progresso, relatorio, GUI)
 
 
 def limite_de_lote(valor: int) -> int:
@@ -71,7 +74,9 @@ def limite_de_lote(valor: int) -> int:
 
 
 class Progress:
-    """Retomada por lote. Guarda apenas hash do numero + desfecho.
+    """Historico das listas. Guarda apenas hash do numero + desfecho.
+    A retomada e por CONTATO (sessao.resumir): quem ja esta numa lista criada
+    fica de fora da proxima rodada, com o mesmo arquivo ou com outro.
 
     Escrita atomica: grava em .tmp e renomeia, para nao corromper o arquivo se a
     execucao for interrompida no meio.
@@ -89,15 +94,15 @@ class Progress:
                 self.data = {"lists": {}}
         self.data.setdefault("lists", {})
 
-    def done(self, label: str) -> bool:
-        return bool(self.data["lists"].get(label, {}).get("completed"))
-
-    def processed_hashes(self, label: str) -> set[str]:
-        entry = self.data["lists"].get(label, {})
-        return {r["hash"] for r in entry.get("results", []) if "hash" in r}
-
-    def mark(self, label: str, results: list[dict], completed: bool) -> None:
-        self.data["lists"][label] = {"completed": completed, "results": results}
+    def mark(self, label: str, results: list[dict], completed: bool,
+             csv: str = "") -> None:
+        """Nunca sobrescreve um registro anterior: os rotulos recomecam em 001 a
+        cada rodada (so os restantes sao divididos), entao um rotulo repetido
+        ganha o horario na chave. Fica so o nome do arquivo, nunca o caminho."""
+        agora = datetime.now().isoformat(timespec="minutes")
+        chave = label if label not in self.data["lists"] else f"{label} @ {agora}"
+        self.data["lists"][chave] = {"completed": completed, "results": results,
+                                     "quando": agora, "csv": os.path.basename(csv)}
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(self.data, f, ensure_ascii=False, indent=2)
@@ -128,6 +133,12 @@ def main() -> int:
     ap.add_argument("--limite-por-lista", type=int, default=BROADCAST_LIMIT,
                     help="SO PARA TESTE: lotes menores (ex.: 5) para validar listas em "
                          "sequencia com um CSV pequeno. Nunca passa de 256 nem fica abaixo de 2")
+    ap.add_argument("--exportar", action="store_true",
+                    help="grava, ao lado do CSV, <nome>.restantes.csv, <nome>.adicionados.csv "
+                         "e <nome>.nao-adicionados.csv desta sessao; nao toca no iPhone")
+    ap.add_argument("--repetir-nao-encontrados", action="store_true",
+                    help="tentar de novo os contatos que ja sairam como nao encontrado/ambiguo "
+                         "(por padrao ficam de fora: ~3 s cada para falhar de novo)")
     ap.add_argument("--speed", type=float, default=1.0,
                     help="velocidade das pausas internas: 1.0=seguro, 0.6=rapido, 0.4=turbo (experimental)")
     # filtros de area (opcionais) — mesmos do Android
@@ -170,9 +181,22 @@ def main() -> int:
     if limite != BROADCAST_LIMIT:
         log.warning("TESTE: lotes de %d contatos (--limite-por-lista); a operacao real usa %d",
                     limite, BROADCAST_LIMIT)
-    lotes = batching.batch(nums, limit=limite)
+    # Sessao: quem ja esta numa lista CRIADA (hash no progresso) fica de fora;
+    # so os restantes sao divididos. E o que permite parar num dia e seguir
+    # no outro — com o mesmo arquivo ou com o CSV de restantes exportado.
+    progress = Progress(args.progress)
+    ses = sessao.resumir(nums, progress.data,
+                         repetir_nao_encontrados=args.repetir_nao_encontrados)
+    if ses.adicionados or ses.nao_adicionados:
+        log.info("sessao (%s): %s", args.progress, sessao.descrever(ses))
+    lotes = batching.batch(ses.restantes, limit=limite)
     log.info("CSV: %d linha(s) -> %d numero(s) validos/unicos -> %d lista(s) de ate %d",
              len(contatos), len(nums), len(lotes), limite)
+    if args.exportar:
+        for grupo, caminho in sessao.exportar(args.csv, ses).items():
+            log.info("exportado (%s): %s", grupo, caminho)
+        log.info("exportacao concluida; o iPhone nao foi tocado.")
+        return 0
     for i, lote in enumerate(lotes, 1):
         log.info("  %s: %d contatos", batching.label_for(i), len(lote))
 
@@ -188,7 +212,6 @@ def main() -> int:
         log.info("dry-run: o iPhone nao foi tocado.")
         return 0
 
-    progress = Progress(args.progress)
     if not exigir_appium(args.server):
         return 2
     driver = build_driver(args.server, args.wda_bundle or None)
@@ -209,9 +232,6 @@ def main() -> int:
             label = batching.label_for(i)
             if len(lote) < MIN_RECIPIENTS:
                 log.info("%s: pulada (menos de %d contatos)", label, MIN_RECIPIENTS)
-                continue
-            if progress.done(label):
-                log.info("%s: ja concluida (retomada) — pulando", label)
                 continue
             if args.max_lists and criadas >= args.max_lists:
                 log.info("limite --max-lists=%d atingido; parando com seguranca.",
@@ -235,12 +255,14 @@ def main() -> int:
                 pace_sleep(args.pace, j)
 
             spike.finish(args.approve_create)
-            concluida = args.approve_create and spike.state == State.COMPLETED
+            # So conta como criada depois do toque em "Criar" (nao o estado
+            # COMPLETED, que tambem sai quando havia menos de 2 selecionados).
+            concluida = bool(getattr(spike, "lista_criada", False))
             resultados = [
                 {"hash": num_hash(lote[k].e164), **r}
                 for k, r in enumerate(spike.results) if k < len(lote)
             ]
-            progress.mark(label, resultados, concluida)
+            progress.mark(label, resultados, concluida, csv=args.csv)
             if concluida:
                 # Depois de "Criar" o WhatsApp fica DENTRO da conversa da lista:
                 # sem voltar para Conversas, a proxima lista nao acha o "+".
