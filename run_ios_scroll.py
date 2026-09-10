@@ -73,6 +73,13 @@ ALTURA_MINIMA_CELULA = 20
 # dinamicamente por lista (ver `teto_telas_para`); este valor e o PISO.
 MAX_TELAS_POR_LISTA = 400   # trava contra loop infinito (sem filtro, cobre ~51 telas com folga)
 CONTATOS_NOVOS_POR_TELA_ESTIMADO = 5   # para estimar o teto de telas com filtro de DDD
+# TETO ABSOLUTO do teto dinamico (auditoria 2026-09-10, 3a rodada): a formula de
+# `teto_telas_para` nao tinha limite por cima — com um filtro de DDD de 1% ela
+# valia 6.656 telas, e a ~3s por tela isso e uma rodada de 5-6 HORAS sem nenhum
+# aviso ao operador. 1200 telas ~ 1 hora de rodada; acima disso a resposta certa
+# nao e "continua rolando", e parar com salvamento parcial e motivo nomeado
+# ("teto de telas") para o operador decidir (DDD menos raro, agenda menor).
+TETO_TELAS_ABSOLUTO = 1200
 # --turbo: rajada W3C. Toque curto e intervalo entre toques (ms). O iOS
 # registra toques distintos com folga acima de ~50 ms.
 TURBO_TOQUE_MS = 40
@@ -88,6 +95,12 @@ LEITURA_LENTA_S = 7.5       # metade do customSnapshotTimeout (15s): acima disto
                             # tela vazia e tratada como FALHA de leitura, nunca
                             # como fim de agenda (foi exatamente isto no log de
                             # 2026-09-09: 33.6s, vazio, seguido de socket hang up)
+# ATENCAO (auditoria 2026-09-10, 3a rodada): os dois numeros acima sao o tempo de
+# UMA consulta ao WDA, nao o do bloco de leitura inteiro. Uma leitura de tela
+# pode gastar 7-8 varreduras (camada lembrada, camada boa, fallback, re-escalada
+# de profundidade); somar tudo fazia um aparelho SAUDAVEL (0,5s por consulta)
+# estourar 7,5s e a lista sair parcial. Por isso `_ler_celulas` grava o PICO de
+# UMA consulta (ver `_consultar`), e a re-escalada fica de fora da medicao.
 LIMITE_RECTS_INDIVIDUAIS = 40   # acima disto sem conseguir inferir posicao, para
                                 # em vez de pagar 1 chamada HTTP por elemento
                                 # (o custo que cresce com o numero de selecionados)
@@ -184,14 +197,19 @@ def teto_telas_para(limite_por_lista: int, filtro: dict | None) -> int:
     A taxa usada aqui e a da AGENDA inteira (permitidos / nomes) — um TETO
     SUPERIOR da taxa real na tela, que so quem roda no aparelho conhece de
     verdade (numeros homonimos, nomes que nao casam por grafia diferente etc.
-    so reduzem essa taxa). Por isso a formula usa uma folga de 1.3x."""
+    so reduzem essa taxa). Por isso a formula usa uma folga de 1.3x.
+
+    O resultado e limitado por TETO_TELAS_ABSOLUTO: sem esse limite a formula
+    valia 6.656 telas (filtro de 1%), o que a ~3s por tela sao 5-6 HORAS de
+    rodada sem nenhum aviso (auditoria 2026-09-10, 3a rodada). Estourar o teto
+    e um desfecho NOMEADO com salvamento parcial, nao uma perda."""
     if not filtro or not filtro.get("nomes"):
         return MAX_TELAS_POR_LISTA
     taxa = len(filtro["permitidos"]) / filtro["nomes"]
     taxa = max(taxa, 0.01)   # nunca deixa a conta explodir com taxa=0
     telas_estimadas = math.ceil(
         (limite_por_lista / (taxa * CONTATOS_NOVOS_POR_TELA_ESTIMADO)) * 1.3)
-    return max(MAX_TELAS_POR_LISTA, telas_estimadas)
+    return min(max(MAX_TELAS_POR_LISTA, telas_estimadas), TETO_TELAS_ABSOLUTO)
 
 
 def eh_convite(nome_ou_rotulo: str) -> bool:
@@ -234,6 +252,15 @@ class Progresso:
         d = {
             "versao": 1,
             "modo": "scroll-livre",
+            # O arquivo guarda o NOME do ultimo contato de cada lista
+            # ("ultimo_rotulo"). Nao da para trocar por hash: a retomada compara
+            # esse nome em ORDEM ALFABETICA quando o contato foi apagado da
+            # agenda entre uma lista e outra, e hash/prefixo truncado nao
+            # ordenam (ver a decisao registrada em MODO-SCROLL-LIVRE.md).
+            # Por isso o arquivo e tao sensivel quanto o contatos.csv.
+            "sensivel": ("contem o nome do ultimo contato de cada lista "
+                         "(necessario para retomar) — trate como o contatos.csv: "
+                         "fica so no Mac, nunca por e-mail/anexo"),
             "offset": self.offset,
             "proximo_contato_n": self.offset + 1,
             "listas_criadas": self.listas_criadas,
@@ -279,10 +306,12 @@ class ScrollLivre(IosSpike):
     e troca apenas a etapa de selecao: em vez de buscar por numero, toca nos
     contatos na ordem da tela e rola."""
 
-    # Checa se o WhatsApp esta em primeiro plano a cada N toques (nao a cada tela).
-    # O activeAppInfo e uma chamada de rede; fazer so uma vez por tela ja economiza;
-    # fazer so a cada N toques economiza ainda mais sem comprometer a seguranca.
-    _CHECAR_INTERVALO = 8
+    # NAO existe checagem "periodica a cada N toques" aqui: a checagem de
+    # seguranca e SEMPRE forcada, nos momentos em que ela vale (fim de cada
+    # tela, toque que falhou, fim da lista). O contador periodico que existia
+    # ate 2026-09-10 era um botao morto — os tres pontos de chamada passavam
+    # forcar=True, entao o intervalo nunca era consultado, e mesmo assim o
+    # comentario prometia ao operador uma checagem que nunca acontecia.
 
     def __init__(self, driver, profile, limite: int = BROADCAST_LIMIT,
                 max_telas: int = MAX_TELAS_POR_LISTA):
@@ -294,13 +323,19 @@ class ScrollLivre(IosSpike):
         self.ignorar: set = set()       # hashes ANTES do ponto de retomada (nunca tocar)
         self.ordem: list = []           # (hash, nome) na ordem de toque
         self.stats = {"telas": 0, "toques": 0, "repetidos": 0, "convites": 0,
-                      "sem_rotulo": 0, "cliques_falhos": 0, "telas_retomada": 0}
+                      "sem_rotulo": 0, "cliques_falhos": 0, "telas_retomada": 0,
+                      # celula que falhou 2x na MESMA tela: nao e mais abandonada
+                      # em silencio (ver selecionar) — vira parada nomeada.
+                      "travados": 0}
         self._tamanho = None
         self._topo = 0.0
         self._profundidade = None
         self._profundidade_reescalada = False   # 1 re-escalada por lista (orcamento de tempo)
         self._ultima_leitura_bruta = 0   # celulas que a BUSCA achou na ultima leitura
-        self._toques_desde_check = 0   # contador para checagem periodica de seguranca
+        # Pico (s) de UMA consulta ao WDA dentro da leitura em andamento. A
+        # valvula de leitura mede ISTO, nao a soma do bloco (ver LEITURA_LENTA_S).
+        self._pico_consulta = 0.0
+        self._observador_consulta = self._marcar_consulta
         # Motivo de uma parada FORCADA (nao e "fim de agenda" nem "limite
         # atingido"): teto de telas, leitura que estourou o tempo, rajada
         # interrompida no meio. "" = a selecao terminou normalmente (limite
@@ -379,7 +414,19 @@ class ScrollLivre(IosSpike):
         tentar seria terminar a lista com 1 contato achando que "a agenda
         acabou". So busca pontual (find_all, nunca varredura nova) e so UMA
         vez por lista, com orcamento de tempo: nao pode ser o proximo socket
-        hang up."""
+        hang up.
+
+        O orcamento de 3s so vale se ele for conferido DEPOIS de cada busca
+        (auditoria 2026-09-10, 3a rodada): conferindo so entre iteracoes, a
+        primeira era incondicional — e ela e justamente a busca mais cara, na
+        profundidade MAIOR que a que acabou de travar. E se a leitura que
+        motivou esta chamada ja voltou LENTA, o problema nao e profundidade: e
+        o WDA. Nesse caso nao se gasta nem um update_settings."""
+        if self._pico_consulta >= LEITURA_LENTA_S:
+            log.warning("nao subo a profundidade depois de uma consulta de %.1fs: "
+                        "o sintoma e do WDA, nao da arvore (subir so aumentaria o "
+                        "custo da proxima busca)", self._pico_consulta)
+            return False
         if self._ultima_leitura_bruta:
             # A busca ACHA celulas; a tela ficou vazia so porque todas caem
             # fora da area tocavel (margem inferior / faixa do topo). Isso e
@@ -400,7 +447,15 @@ class ScrollLivre(IosSpike):
                 self.d.update_settings({"snapshotMaxDepth": depth})
             except WebDriverException:
                 pass
-            if self.find_all("contact_cell"):
+            achou = self.find_all("contact_cell")
+            if not achou and time.monotonic() - t0 > 3.0:
+                # orcamento estourou DENTRO desta tentativa (a busca custou mais
+                # do que o orcamento inteiro): nao comeca a proxima, que seria
+                # ainda mais funda.
+                log.warning("orcamento da re-escalada de profundidade estourou na "
+                            "profundidade %d — nao tento mais fundo", depth)
+                break
+            if achou:
                 log.info("profundidade insuficiente: subindo de %d para %d "
                          "(a faixa de chips deve ter afundado a arvore)",
                          self._profundidade, depth)
@@ -453,18 +508,32 @@ class ScrollLivre(IosSpike):
         Isso elimina as chamadas redundantes a "name" e "value" que ocorriam via
         _cell_text(), caindo de ~40 para ~20 chamadas por tela.
 
-        Cronometrada (auditoria 2026-09-10): a duracao de cada leitura fica em
-        self._duracoes_leitura (ultimas 10) para a valvula de tempo distinguir
-        'tela vazia = fim de agenda' de 'tela vazia = o WDA nao respondeu'."""
+        Cronometrada (auditoria 2026-09-10): o que fica em self._duracoes_leitura
+        (ultimas 10) e o PICO de UMA consulta ao WDA desta leitura — nao a soma
+        do bloco. Uma leitura gasta ate 7-8 varreduras (camada lembrada, camada
+        boa, fallback, re-escalada de profundidade); somando tudo, um aparelho
+        saudavel de 0,5s por consulta "estourava" os 7,5s de LEITURA_LENTA_S e a
+        lista saia parcial sem nenhuma consulta individual ter sido lenta
+        (3a rodada da auditoria). A valvula precisa do tempo de UMA consulta,
+        que e o numero contra o qual LEITURA_LENTA_S foi calibrado."""
         t0 = time.monotonic()
+        self._pico_consulta = 0.0
         try:
             return self._ler_celulas_impl(margem)
         finally:
-            dur = time.monotonic() - t0
-            self._duracoes_leitura.append(dur)
+            bloco = time.monotonic() - t0
+            self._duracoes_leitura.append(self._pico_consulta)
             if len(self._duracoes_leitura) > 10:
                 self._duracoes_leitura.pop(0)
-            log.debug("leitura da tela em %.3fs", dur)
+            log.debug("leitura da tela: bloco %.3fs, consulta mais lenta %.3fs",
+                      bloco, self._pico_consulta)
+
+    def _marcar_consulta(self, dur: float) -> None:
+        """Gancho chamado a CADA consulta ao WDA (ver IosSpike._consulta_cronometrada).
+        Guarda o pico de UMA consulta da leitura em andamento: e esse numero,
+        nao a soma do bloco, que LEITURA_RAPIDA_S/LEITURA_LENTA_S medem."""
+        if dur > self._pico_consulta:
+            self._pico_consulta = dur
 
     def _ler_celulas_impl(self, margem: float) -> list:
         self._fixar_profundidade()
@@ -719,8 +788,16 @@ class ScrollLivre(IosSpike):
         self.stats["toques"] += 1
         self.results.append({"label": f"s{len(self.ordem)}", "outcome": "selected"})
 
-    def _tocar_lote(self, lote: list) -> list:
+    def _tocar_lote(self, lote: list) -> tuple[list, list]:
         """--turbo: toca todas as celulas do lote com UMA requisicao W3C.
+
+        Devolve (tocadas, falhadas). `falhadas` so tem conteudo no caminho de
+        fallback (o driver recusou 'actions' e os toques foram por elemento):
+        uma celula que falhou ali NAO pode ser descartada em silencio — quem
+        chama a retenta como retenta qualquer falha de clique (auditoria
+        2026-09-10, 3a rodada: `[c for c in lote if self._tocar(c)]` era o
+        unico lugar do codigo onde uma falha de clique nao gerava retentativa,
+        e o contato sumia para sempre porque o progresso passava por cima dele).
 
         As coordenadas sao as lidas nesta mesma tela, segundos antes. Depois
         da rajada confere, com uma busca pontual, que o seletor continua na
@@ -743,7 +820,7 @@ class ScrollLivre(IosSpike):
         controle para o salvamento parcial com o que ja estava confirmado
         ANTES desta rajada."""
         if not lote:
-            return []
+            return [], []
         acoes = []
         for c in lote:
             x, y = c.centro
@@ -768,7 +845,19 @@ class ScrollLivre(IosSpike):
                 # Devolve QUEM foi tocado, nao quantos: um clique pode falhar
                 # no meio do lote ("element is not hittable"), e ai os N
                 # primeiros do lote NAO sao os N tocados.
-                return [c for c in lote if self._tocar(c)]
+                #
+                # E PARA no primeiro que falhar, sem tentar os seguintes: assim
+                # tudo o que foi tocado esta ANTES do ponto que falhou, e o
+                # ponto de retomada gravado (ultimo tocado) nunca ultrapassa a
+                # celula que ficou de fora. Quem chama retenta essa celula.
+                tocadas, falhadas = [], []
+                for c in lote:
+                    if self._tocar(c):
+                        tocadas.append(c)
+                    else:
+                        falhadas.append(c)
+                        break
+                return tocadas, falhadas
             self.parada = "rajada interrompida"
             self.incerteza = [c.hash for c in lote]
             log.error("turbo: a rajada morreu no meio (%s) — %d contato(s) desta "
@@ -783,21 +872,62 @@ class ScrollLivre(IosSpike):
         # O seletor precisa continuar aqui. Um dialogo por cima (contato
         # bloqueado, aviso do sistema) teria engolido parte da rajada.
         self._ancora_confirmada = False
-        if self.wait_for("picker_anchor", timeout=2, required=False) is None:
+        if not self._confirmar_ancora_apos_rajada():
+            # A RAJADA FOI ENVIADA COM SUCESSO: os toques podem perfeitamente
+            # ter surtido efeito no aparelho e so a CONFERENCIA ter falhado
+            # (neste iPhone uma consulta ja levou 33.640 ms). Este ramo nao
+            # pode dizer que "a lista nao foi criada" nem seguir sem registrar
+            # a duvida: quem so registra o confirmado grava um progresso MENOR
+            # do que a lista que o aparelho tem, e a rodada seguinte repete
+            # essas pessoas (auditoria 2026-09-10, 3a rodada).
+            self.parada = ("ancora nao confirmada apos rajada turbo "
+                           "(os toques podem ter surtido efeito no aparelho)")
+            self.incerteza = [c.hash for c in lote]
+            log.error("turbo: a rajada saiu, mas o botao Criar nao reapareceu nas "
+                      "duas conferencias seguintes — %d contato(s) desta rajada "
+                      "ficam EM DUVIDA (podem estar marcados no iPhone sem estarem "
+                      "no progresso); %d ja confirmado(s) antes dela seguem validos",
+                      len(lote), len(self.ordem))
             raise UiChanged(
-                "o seletor de contatos sumiu durante a rajada de toques (turbo). "
-                "Feche o que estiver na tela, cancele o seletor e rode de novo — "
-                "esta lista nao foi criada.")
+                "o botao Criar do seletor nao reapareceu depois da rajada de toques "
+                "(turbo). Nao da para confirmar quantos contatos entraram: confira "
+                "no iPhone antes da proxima rodada.")
         # SO AQUI a ancora e uma prova valida para esta tela (ver
         # _checar_seguranca): a busca acabou de acontecer, depois dos toques.
         self._ancora_confirmada = True
         for c in lote:
             self._registrar_toque(c)
-        return list(lote)
+        return list(lote), []
 
-    def _descarregar_lote(self, lote: list, tocados_tela: dict) -> tuple[int, list, bool]:
+    def _confirmar_ancora_apos_rajada(self) -> bool:
+        """O botao Criar continua na tela depois da rajada?
+
+        UMA consulta de 2s nao prova que o seletor sumiu: no log de 2026-09-09
+        uma consulta a este mesmo WDA levou 33.640 ms com o seletor INTACTO.
+        Tratar esse pico como "o seletor sumiu" (era o que este codigo fazia
+        ate 2026-09-10) criava o pior desfecho possivel: a lista era criada
+        pelo main() logo depois — quando o pico ja tinha passado — com MAIS
+        contatos do que o progresso registrava, e a rodada seguinte repetia
+        essas pessoas. Mesmo criterio da valvula de leitura: uma leitura lenta
+        e suspeita de WDA, nao evidencia de UI trocada. Por isso: 2 tentativas,
+        a segunda mais generosa, com uma pausa no meio."""
+        for tentativa, espera in enumerate((2, 6), start=1):
+            t0 = time.monotonic()
+            achou = self.wait_for("picker_anchor", timeout=espera, required=False)
+            dur = time.monotonic() - t0
+            if achou is not None:
+                if tentativa > 1:
+                    log.warning("o botao Criar so reapareceu na 2a conferencia "
+                                "(%.1fs): pico do WDA, nao troca de tela", dur)
+                return True
+            log.warning("conferencia %d apos a rajada: botao Criar nao encontrado "
+                        "em %.1fs", tentativa, dur)
+            self.settle(0.5)
+        return False
+
+    def _descarregar_lote(self, lote: list, tocados_tela: dict) -> tuple[int, list, bool, list]:
         """Envia o lote acumulado (rajada turbo) e devolve
-        (novos, [], ancora_confirmada).
+        (novos, [], ancora_confirmada, falhadas).
         Lotes menores (MAX_LOTE_TURBO) == janela menor em que as coordenadas
         lidas podem ficar desatualizadas (faixa de chips mudando de altura).
 
@@ -809,32 +939,34 @@ class ScrollLivre(IosSpike):
         Antes (auditoria 2026-09-10, 2a rodada) esta funcao dizia "confirmada"
         tambem no caminho do fallback: a tela inteira ficava sem a trava."""
         if not lote:
-            return 0, [], False
+            return 0, [], False, []
         self._ancora_confirmada = False
-        tocados = self._tocar_lote(lote)
+        tocados, falhadas = self._tocar_lote(lote)
         for c in tocados:
             tocados_tela[c.hash] = c.y
-        return len(tocados), [], self._ancora_confirmada
+        return len(tocados), [], self._ancora_confirmada, falhadas
 
-    def _checar_seguranca(self, forcar: bool = False, ancora_ja_confirmada: bool = False) -> None:
-        """Verifica se o WhatsApp continua em primeiro plano e se o seletor
-        continua na tela. Chamada forcada (forcar=True) nos momentos criticos
-        (falha de clique, fim da lista, saida do loop). Chamada periodica
-        automatica a cada _CHECAR_INTERVALO toques — evita chamar activeAppInfo
-        por tela.
+    def _checar_app_em_frente(self) -> None:
+        """Trava DURA e INCONDICIONAL: o WhatsApp continua em primeiro plano?
 
-        `ancora_ja_confirmada=True` pula a busca do picker_anchor: uma rajada
-        turbo desta MESMA tela ja provou, segundos antes, que o seletor
-        continua aqui (_tocar_lote confirma antes de registrar) — repetir a
-        busca seria a 2a consulta identica por tela (auditoria 2026-09-10).
-        A checagem do app em primeiro plano nunca e pulada."""
-        self._toques_desde_check += 1
-        if not forcar and self._toques_desde_check < self._CHECAR_INTERVALO:
-            return
-        self._toques_desde_check = 0
+        Mora numa funcao propria de proposito. Enquanto isto era a primeira
+        metade de `_checar_seguranca`, a trava so sobrevivia pela ORDEM de duas
+        linhas: mover o `if ancora_ja_confirmada: return` para cima (a
+        refatoracao mais natural do mundo) deixava a estacao tocar dezenas de
+        vezes com outro app na frente, e os 54 testes continuavam verdes
+        (auditoria 2026-09-10, 3a rodada)."""
         if not self._whatsapp_in_front():
             raise UiChanged("um app externo abriu durante a selecao (celula 'Convidar'?) "
                             "— parei sem tocar em mais nada; volte ao WhatsApp e rode de novo")
+
+    def _checar_ancora(self, ancora_ja_confirmada: bool = False) -> None:
+        """O seletor continua na tela? (checagem PULAVEL — e so a economia de
+        uma busca repetida, nunca a trava de app em primeiro plano.)
+
+        `ancora_ja_confirmada=True`: uma rajada turbo desta MESMA tela ja
+        provou, segundos antes, que o seletor continua aqui (_tocar_lote
+        confirma antes de registrar); repetir a busca seria a 2a consulta
+        identica por tela (auditoria 2026-09-10)."""
         if ancora_ja_confirmada:
             return
         # No seletor, a prova mais forte e mais barata de que nada estranho
@@ -845,6 +977,29 @@ class ScrollLivre(IosSpike):
             raise UiChanged("o seletor de contatos sumiu (dialogo por cima ou tela "
                             "trocada) — parei sem tocar em mais nada; feche o que "
                             "estiver na tela e rode de novo")
+
+    def _checar_seguranca(self, forcar: bool = True, ancora_ja_confirmada: bool = False) -> None:
+        """As duas checagens, nesta ordem, SEMPRE: app em primeiro plano
+        (incondicional) e depois seletor na tela (pulavel). Chamada nos
+        momentos que valem: fim de cada tela, toque que falhou, fim da lista.
+        `forcar` continua no lugar so por compatibilidade de chamada."""
+        self._checar_app_em_frente()
+        self._checar_ancora(ancora_ja_confirmada)
+
+    def _retentar_falhas(self, falhadas: list, falhas: dict) -> list:
+        """Trata falha(s) de clique: conta a falha, confere seguranca e rele a
+        tela para reprocessar do inicio. Vale tanto para o toque por elemento
+        quanto para o fallback da rajada turbo — que ate 2026-09-10 descartava
+        a celula sem nenhuma retentativa.
+
+        Nunca re-toca quem ja teve sucesso: o laco pula quem esta em
+        self.tocados, e tocar de novo DESMARCARIA o contato."""
+        for c in falhadas:
+            falhas[c.hash] = falhas.get(c.hash, 0) + 1
+            log.debug("falha de toque em %s (%da nesta tela)", mask(c.nome),
+                      falhas[c.hash])
+        self._checar_seguranca()      # clique falhou: momento critico
+        return self._ler_celulas()
 
     def selecionar(self, prog: Progresso) -> int:
         """Seleciona ate self.limite contatos a partir do ponto de retomada.
@@ -874,7 +1029,24 @@ class ScrollLivre(IosSpike):
             # pular a busca da ancora. Toque por elemento nao prova nada.
             ancora_provada = False
             i = 0
-            while i < len(cels) and len(self.ordem) + len(lote) < self.limite:
+            while len(self.ordem) + len(lote) < self.limite:
+                if i >= len(cels):
+                    # fim das celulas desta tela: descarrega o que sobrou no lote
+                    # AQUI DENTRO, para que uma falha de clique no fallback da
+                    # rajada ainda possa ser retentada nesta mesma tela (antes
+                    # esse descarregamento so acontecia depois do laco, e a
+                    # celula que falhou ficava para tras — ver _tocar_lote).
+                    if not lote:
+                        break
+                    feitos, lote, confirmou, falhadas = self._descarregar_lote(
+                        lote, tocados_tela)
+                    novos += feitos
+                    ancora_provada = confirmou
+                    if falhadas:
+                        cels = self._retentar_falhas(falhadas, falhas)
+                        i = 0
+                        continue
+                    break
                 c = cels[i]
                 i += 1
                 if c.hash in self.ignorar:
@@ -894,7 +1066,34 @@ class ScrollLivre(IosSpike):
                         self.stats["repetidos"] += 1
                     continue
                 if falhas.get(c.hash, 0) >= 2:
-                    continue                     # nao alcancavel nesta tela; segue
+                    # DIVIDA (B), fechada em 2026-09-10 (3a rodada): aqui havia
+                    # um `continue`. Era o unico caminho de "pular contato em
+                    # silencio" que restava — a celula saia da lista, os
+                    # contatos SEGUINTES eram tocados, e o ponto de retomada
+                    # gravado (ultimo tocado) passava por cima dela: nenhuma
+                    # rodada futura chegava perto desse contato.
+                    #
+                    # Agora e uma parada nomeada, ANTES de tocar em qualquer
+                    # celula posterior desta tela. O salvamento parcial de
+                    # main() cria a lista com o que foi confirmado ate aqui e
+                    # grava como ponto de retomada o ULTIMO TOCADO — que, por
+                    # construcao, e alfabeticamente ANTERIOR a esta celula.
+                    # Na proxima lista o seletor e reaberto do zero (outra
+                    # renderizacao, outra faixa de chips) e este contato e
+                    # reencontrado naturalmente. Nao ha retrocesso do ancora
+                    # de retomada (que duplicaria gente ja incluida em lista
+                    # anterior): so parada mais cedo.
+                    self.stats["travados"] += 1
+                    self.parada = "contato inalcancavel (2 falhas de toque na mesma tela)"
+                    log.error("o contato %s falhou 2x nesta tela (nao alcancavel: "
+                              "sob a faixa de chips? 'element is not hittable'?). "
+                              "PARANDO aqui em vez de pula-lo em silencio — ele "
+                              "continua sendo o proximo da fila na rodada seguinte.",
+                              mask(c.nome))
+                    raise UiChanged(
+                        "um contato nao pode ser tocado nesta tela depois de 2 "
+                        "tentativas; parei antes de tocar nos seguintes para nao "
+                        "deixa-lo para tras (ele e o proximo da proxima lista)")
                 # Convite decidido pelo rotulo ja lido: zero chamadas ao WDA.
                 # (Antes: _is_invite_cell fazia 3-4 chamadas POR CELULA.)
                 if eh_convite(c.nome):
@@ -906,16 +1105,18 @@ class ScrollLivre(IosSpike):
                 if self.turbo and not primeiro_toque:
                     lote.append(c)               # junta; toca em lotes pequenos (MAX_LOTE_TURBO)
                     if len(lote) >= MAX_LOTE_TURBO:
-                        feitos, lote, confirmou = self._descarregar_lote(lote, tocados_tela)
+                        feitos, lote, confirmou, falhadas = self._descarregar_lote(
+                            lote, tocados_tela)
                         novos += feitos
                         ancora_provada = confirmou
+                        if falhadas:
+                            cels = self._retentar_falhas(falhadas, falhas)
+                            i = 0
                     continue
                 y_antes = c.y
                 if not self._tocar(c):
                     # elemento saiu do lugar: confere seguranca, rele a tela e refaz
-                    falhas[c.hash] = falhas.get(c.hash, 0) + 1
-                    self._checar_seguranca(forcar=True)   # clique falhou: critico
-                    cels = self._ler_celulas()
+                    cels = self._retentar_falhas([c], falhas)
                     i = 0
                     continue
                 novos += 1
@@ -929,13 +1130,22 @@ class ScrollLivre(IosSpike):
                     tocados_tela = {h: y + delta for h, y in tocados_tela.items()}
                     i = 0
             if lote:
-                feitos, lote, confirmou = self._descarregar_lote(lote, tocados_tela)
+                # So chega aqui quando o laco parou pelo LIMITE da lista. Uma
+                # falha de clique no fallback aqui nao deixa ninguem para tras:
+                # o fallback para no primeiro que falha, entao tudo o que foi
+                # tocado e alfabeticamente ANTERIOR a ele, e o ponto de retomada
+                # gravado tambem — a proxima lista o reencontra.
+                feitos, lote, confirmou, falhadas = self._descarregar_lote(lote, tocados_tela)
                 novos += feitos
                 ancora_provada = confirmou
-            # Checagem de seguranca forcada no fim de cada tela (reinicia o contador).
-            # Dentro do loop de toques, ela ja roda periodicamente a cada _CHECAR_INTERVALO.
-            # Se uma rajada desta tela ja confirmou o picker_anchor, nao repete a busca.
-            self._checar_seguranca(forcar=True, ancora_ja_confirmada=ancora_provada)
+                if falhadas:
+                    log.warning("%d contato(s) do ultimo lote nao foram tocados "
+                                "(clique falhou com a lista ja no limite); eles "
+                                "continuam na fila da proxima lista", len(falhadas))
+            # Checagem de seguranca no fim de cada tela: app em primeiro plano
+            # (sempre) + seletor na tela. Se uma rajada desta tela ja confirmou
+            # o picker_anchor, so a busca da ancora e dispensada.
+            self._checar_seguranca(ancora_ja_confirmada=ancora_provada)
             log.info("tela %d: +%d (total %d/%d) — %ds", tela + 1, novos,
                      len(self.ordem), self.limite, int(time.monotonic() - t0))
             if len(self.ordem) >= self.limite:
@@ -955,8 +1165,22 @@ class ScrollLivre(IosSpike):
                             continue
                         if eh_convite(c.nome):
                             continue
-                        self._tocar(c)
-                    self._checar_seguranca(forcar=True)   # fim da lista: critico
+                        if not self._tocar(c):
+                            # Mesma regra da divida (B): parar em vez de seguir
+                            # tocando nos POSTERIORES, senao o ponto de retomada
+                            # gravado passa por cima deste contato e ele nunca
+                            # mais volta. Aqui e a ultima passada da agenda, mas
+                            # o raciocinio e identico.
+                            self.stats["travados"] += 1
+                            self.parada = ("contato inalcancavel na ultima passada "
+                                           "(borda inferior da agenda)")
+                            log.error("o contato %s nao pode ser tocado na ultima "
+                                      "passada; parando com %d confirmado(s) para "
+                                      "nao deixa-lo para tras", mask(c.nome),
+                                      len(self.ordem))
+                            self._logar_filtrados()
+                            return len(self.ordem)
+                    self._checar_seguranca()   # fim da lista: critico
                     log.info("fim da lista de contatos (a agenda esgotou de verdade)")
                     break
             else:
@@ -966,8 +1190,26 @@ class ScrollLivre(IosSpike):
             cels = self._ler_celulas()
             if not cels:
                 dur = self._duracoes_leitura[-1] if self._duracoes_leitura else 0.0
-                if not self.in_picker():
-                    raise UiChanged("o seletor de contatos desapareceu durante a rolagem")
+                # ORDEM (auditoria 2026-09-10, 3a rodada): quem decide primeiro e
+                # o RELOGIO, nao o in_picker(). No log de 2026-09-09 a leitura
+                # voltou vazia em 33,6s e a chamada seguinte morreu com socket
+                # hang up: nesse estado o in_picker() engole WebDriverException
+                # camada por camada, devolve False e o operador lia "o seletor
+                # sumiu" quando o que caiu foi o WDA — com N contatos ainda
+                # marcados no iPhone. Uma consulta LENTA nao e evidencia sobre a
+                # UI; e evidencia sobre o WDA, e ai a resposta certa e parar com
+                # salvamento parcial, sem gastar mais nenhuma chamada.
+                if dur >= LEITURA_LENTA_S:
+                    self.parada = "leitura vazia lenta (nao e fim de agenda)"
+                    log.error("leitura vazia apos consulta de %.1fs ao WDA: tratando "
+                              "como falha de leitura, NAO como fim de agenda nem como "
+                              "seletor sumido — parando com %d confirmado(s)",
+                              dur, len(self.ordem))
+                    self._logar_filtrados()
+                    return len(self.ordem)
+                estado = self.in_picker_status()
+                if estado != "sim":
+                    raise UiChanged(self._msg_sem_seletor(estado))
                 # Vazio LENTO nao e "fim de agenda": e o sintoma exato do log de
                 # 2026-09-09 (33.6s, vazio, seguido de socket hang up).
                 if LEITURA_RAPIDA_S <= dur < LEITURA_LENTA_S:
@@ -983,8 +1225,16 @@ class ScrollLivre(IosSpike):
                 # dentro da propria leitura — ver _ler_celulas_impl. Aqui ela
                 # chegava tarde demais, depois de uma rolagem as cegas.)
                 if not cels:
-                    if not self.in_picker():
-                        raise UiChanged("o seletor de contatos desapareceu durante a rolagem")
+                    if dur >= LEITURA_LENTA_S:
+                        self.parada = "leitura vazia lenta (nao e fim de agenda)"
+                        log.error("a retentativa tambem voltou vazia apos uma consulta "
+                                  "de %.1fs: falha de leitura, NAO fim de agenda — "
+                                  "parando com %d confirmado(s)", dur, len(self.ordem))
+                        self._logar_filtrados()
+                        return len(self.ordem)
+                    estado = self.in_picker_status()
+                    if estado != "sim":
+                        raise UiChanged(self._msg_sem_seletor(estado))
                     if dur < LEITURA_RAPIDA_S:
                         log.info("fim da lista de contatos (tela vazia, leitura "
                                  "rapida — %.2fs)", dur)
@@ -1003,6 +1253,18 @@ class ScrollLivre(IosSpike):
                         self.max_telas, len(self.ordem))
         self._logar_filtrados()
         return len(self.ordem)
+
+    @staticmethod
+    def _msg_sem_seletor(estado: str) -> str:
+        """Diagnostico honesto: 'o seletor sumiu' e uma afirmacao sobre a TELA,
+        e so pode ser feita quando o WDA respondeu. Quando TODAS as consultas
+        levantaram excecao (sessao caida, socket hang up), o que aconteceu foi
+        outra coisa — e o operador precisa ler outra coisa."""
+        if estado == "sem_resposta":
+            return ("o WDA nao respondeu a nenhuma consulta (sessao caida / socket "
+                    "hang up?) durante a rolagem — nao da para afirmar o que esta na "
+                    "tela do iPhone; confira o aparelho antes da proxima rodada")
+        return "o seletor de contatos desapareceu durante a rolagem"
 
     def _logar_filtrados(self) -> None:
         """stats['filtrados'] era coletado e nunca impresso. Vale para TODOS
@@ -1155,8 +1417,8 @@ def main() -> int:
                     "aberto da auditoria de 2026-09-10) — se uma rajada morrer "
                     "no meio, os toques dessa rajada ficam em duvida (nem "
                     "contados, nem re-tocados: re-tocar desmarcaria quem ja "
-                    "entrou). Confira SEMPRE no iPhone o numero de destinatarios "
-                    "da lista criada.", args.limite_por_lista)
+                    "entrou). Confira SEMPRE no iPhone quantos contatos "
+                    "entraram na transmissao.", args.limite_por_lista)
 
     if not spike_ios.exigir_appium(args.server):
         return 2
@@ -1199,9 +1461,19 @@ def main() -> int:
             dur = int(time.monotonic() - t0)
             log.info("lista %d: %d contato(s) selecionado(s) em %ds — telas %d, "
                      "retomada %d tela(s), homonimos ignorados %d, convites %d, "
-                     "cliques refeitos %d",
+                     "cliques que falharam e foram refeitos %d, sem rotulo %d, "
+                     "travados %d",
                      numero_lista, qtd, dur, sp.stats["telas"], sp.stats["telas_retomada"],
-                     sp.stats["repetidos"], sp.stats["convites"], sp.stats["cliques_falhos"])
+                     sp.stats["repetidos"], sp.stats["convites"], sp.stats["cliques_falhos"],
+                     sp.stats["sem_rotulo"], sp.stats["travados"])
+            if sp.stats["sem_rotulo"]:
+                # stats['sem_rotulo'] era escrito e NUNCA lido, apesar de a tabela
+                # de diagnostico do MODO-SCROLL-LIVRE.md mandar o operador
+                # procurar este numero no resumo (auditoria 2026-09-10, 3a rodada).
+                log.warning("%d celula(s) voltaram SEM ROTULO em duas leituras e "
+                            "foram descartadas: elas podem ter ficado de fora desta "
+                            "lista. Se faltar alguem, e por aqui que se comeca a "
+                            "procurar.", sp.stats["sem_rotulo"])
 
             if sp.parada:
                 log.warning("selecao desta lista foi interrompida: %s", sp.parada)
@@ -1233,10 +1505,23 @@ def main() -> int:
                         # Janela de incerteza: hashes tocados numa rajada que nao
                         # pode ser confirmada nem re-tocada (nunca nomes/numeros).
                         prog.historico[-1]["toques_incertos"] = list(sp.incerteza)
+                        prog.historico[-1]["conferir_no_iphone"] = (
+                            f"a lista pode ter ate {len(sp.incerteza)} destinatario(s) "
+                            "a mais do que o progresso registra; esses contatos podem "
+                            "reaparecer na proxima lista")
                     prog.salvar()
                     log.warning("lista %d criada PARCIAL: %d de ate %d contato(s) "
                                 "pedidos (motivo da parada: %s). %s", numero_lista,
                                 qtd, args.limite_por_lista, sp.parada, prog.resumo())
+                    if sp.incerteza:
+                        log.warning("CONFIRA NO IPHONE o numero de destinatarios da "
+                                    "lista %d: %d toque(s) ficaram em duvida (a rajada "
+                                    "saiu, mas nao deu para confirmar). Se a lista "
+                                    "tiver mais gente do que o progresso diz, esses "
+                                    "contatos vao aparecer TAMBEM na proxima lista — "
+                                    "e melhor repetir do que deixar alguem de fora, "
+                                    "mas o operador precisa saber.",
+                                    numero_lista, len(sp.incerteza))
                     print(json.dumps({
                         "listas_criadas_nesta_rodada": criadas, "offset": prog.offset,
                         "proximo_contato_n": prog.offset + 1,

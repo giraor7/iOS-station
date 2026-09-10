@@ -282,17 +282,52 @@ class Progresso(unittest.TestCase):
     def test_paradas_forcadas_nao_leem_como_fim_de_agenda(self):
         """Auditoria 2026-09-10: teto de telas, leitura lenta e rajada
         interrompida NAO podem soar como 'Fim da agenda.' — o operador
-        confiaria numa lista mais curta do que devia."""
+        confiaria numa lista mais curta do que devia.
+
+        3a rodada: as linhas usadas aqui sao as REAIS do runner, com o sufixo
+        "(motivo da parada: ...)" que ele SEMPRE acrescenta — antes o teste
+        cortava a string exatamente antes do sufixo, e por isso nao via que a
+        frase mostrada ao operador no fim de uma rodada que CRIOU uma lista
+        era "conferindo o que foi confirmado…". E cada caso exige a frase
+        exata, nao apenas "diferente de Fim da agenda".
+        """
         casos = (
-            "WARNING leitura vazia lenta (8.3s) — retentando uma vez",
-            "WARNING teto de telas atingido (5 telas) sem terminar a lista",
-            "ERROR turbo: a rajada morreu no meio (...) — rajada interrompida",
-            "WARNING lista 3 criada PARCIAL: 9 de ate 60 contato(s) pedidos",
+            ("WARNING leitura vazia lenta (8.3s) — retentando uma vez",
+             "A tela demorou para responder; conferindo com segurança antes de "
+             "continuar…"),
+            ("WARNING teto de telas atingido (5 telas) sem terminar a lista",
+             "Chegou ao limite de telas desta lista sem esgotar a agenda; "
+             "salvando o que foi confirmado…"),
+            ("ERROR turbo: a rajada morreu no meio (...) — rajada interrompida",
+             "O toque em lote foi interrompido; conferindo o que foi confirmado…"),
+            # a linha REAL do salvamento parcial carrega o motivo grudado:
+            ("WARNING lista 3 criada PARCIAL: 9 de ate 60 contato(s) pedidos "
+             "(motivo da parada: rajada interrompida). 1 lista(s) criada(s)",
+             "Lista criada com os contatos confirmados até aqui."),
+            ("WARNING lista 3 criada PARCIAL: 9 de ate 60 contato(s) pedidos "
+             "(motivo da parada: leitura vazia lenta (nao e fim de agenda)).",
+             "Lista criada com os contatos confirmados até aqui."),
+            ("WARNING lista 3 criada PARCIAL: 9 de ate 60 (motivo da parada: "
+             "teto de telas).", "Lista criada com os contatos confirmados até aqui."),
         )
-        for linha in casos:
+        for linha, esperada in casos:
             frase = st.etapa_humana(linha)
-            self.assertTrue(frase, linha)
+            self.assertEqual(frase, esperada, linha)
             self.assertNotEqual(frase, "Fim da agenda.", linha)
+
+    def test_limite_do_ensaio_aparece_na_confirmacao(self):
+        """A caixa de confirmacao da execucao REAL e o ultimo ponto humano
+        antes de a estacao mexer no WhatsApp: ela nao pode prometer "ate 256
+        contatos" quando o ensaio escolhido manda 5."""
+        linhas = st.resumo_confirmacao(st.Fonte.SCROLL, st.Execucao.REAL, None,
+                                       [], 0, 3, limite=5)
+        self.assertIn(("Listas", "3 de até 5 contatos"), linhas)
+        for _, valor in linhas:
+            self.assertNotIn("256", valor)
+        # sem ensaio (lista cheia) o texto de sempre continua valendo
+        cheia = st.resumo_confirmacao(st.Fonte.SCROLL, st.Execucao.REAL, None,
+                                      [], 0, 3)
+        self.assertIn(("Listas", f"3 de até {st.LIMITE_LISTA} contatos"), cheia)
 
 
 class Desfechos(unittest.TestCase):

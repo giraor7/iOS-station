@@ -147,6 +147,11 @@ class IosSpike:
         # vazio: sem isto, cada contato paga uma consulta perdida (~0,24 s).
         # Zerado a cada picker novo; vazio na camada lembrada => refaz todas.
         self._camada_ok: dict[str, tuple] = {}
+        # Gancho opcional: recebe a duracao (s) de CADA consulta ao WDA, uma a
+        # uma. O Scroll Livre usa isto para a valvula de leitura (uma consulta
+        # lenta e sintoma de WDA doente; a SOMA de varias consultas rapidas nao
+        # e — auditoria 2026-09-10, 3a rodada). None no modo CSV: nada muda.
+        self._observador_consulta = None
         # Rotulo (hash) da celula aceita por single-cell-trust no contato
         # anterior. Guarda contra tocar duas vezes na MESMA celula quando a
         # lista ainda nao refiltrou — o 2o toque DESMARCA o anterior e, sem
@@ -220,12 +225,24 @@ class IosSpike:
             raise UiChanged(f"elemento '{key}' nao localizado por nenhuma camada")
         return None
 
+    def _consulta_cronometrada(self, fn):
+        """Roda UMA consulta ao WDA e avisa o observador quanto ela custou.
+        Sem observador (modo CSV) e so uma chamada de funcao."""
+        obs = self._observador_consulta
+        if obs is None:
+            return fn()
+        t0 = time.monotonic()
+        try:
+            return fn()
+        finally:
+            obs(time.monotonic() - t0)
+
     def find_all(self, key: str) -> list:
         sel = self.p.selectors[key]
         lembrada = self._camada_ok.get(key)
         if lembrada is not None:
             try:
-                els = self.d.find_elements(*lembrada)
+                els = self._consulta_cronometrada(lambda: self.d.find_elements(*lembrada))
                 if els:
                     return els
             except WebDriverException:
@@ -234,7 +251,8 @@ class IosSpike:
             self._camada_ok.pop(key, None)
         for by, val in self._locators(sel):
             try:
-                els = self.d.find_elements(by, val)
+                els = self._consulta_cronometrada(
+                    lambda b=by, v=val: self.d.find_elements(b, v))
             except WebDriverException:
                 continue
             if els:
@@ -284,6 +302,30 @@ class IosSpike:
         if achou:
             raise UnsafeState("compositor de mensagem detectado — abortando sem tocar em nada")
 
+    def in_picker_status(self) -> str:
+        """'sim' | 'nao' | 'sem_resposta'.
+
+        'nao' e uma afirmacao sobre a TELA e so pode ser feita quando o driver
+        respondeu pelo menos uma vez. Quando TODAS as consultas levantaram
+        WebDriverException (sessao caida, socket hang up — o log de 2026-09-09),
+        a resposta honesta e 'sem_resposta': quem chama nao pode dizer ao
+        operador que "o seletor sumiu" quando o que caiu foi o WDA."""
+        houve_resposta = False
+        for key in ("search_field", "clear_search", "picker_search_button",
+                    "cancel_button", "contact_cell", "picker_anchor"):
+            sel = self.p.selectors.get(key)
+            if not sel:
+                continue
+            for by, val in self._locators(sel):
+                try:
+                    achou = self.d.find_elements(by, val)
+                except WebDriverException:
+                    continue
+                houve_resposta = True
+                if achou:
+                    return "sim"
+        return "nao" if houve_resposta else "sem_resposta"
+
     def in_picker(self) -> bool:
         """Ainda estamos no seletor de contatos? (usado para distinguir
         'nenhum resultado' de 'a tela mudou').
@@ -292,18 +334,7 @@ class IosSpike:
         navegacao — e com ela o "Criar" (picker_anchor). Por isso as ancoras
         incluem controles que existem justamente enquanto se pesquisa:
         o campo/botao de busca, o "Limpar texto" e o "Cancelar"."""
-        for key in ("search_field", "clear_search", "picker_search_button",
-                    "cancel_button", "contact_cell", "picker_anchor"):
-            sel = self.p.selectors.get(key)
-            if not sel:
-                continue
-            for by, val in self._locators(sel):
-                try:
-                    if self.d.find_elements(by, val):
-                        return True
-                except WebDriverException:
-                    continue
-        return False
+        return self.in_picker_status() == "sim"
 
 
     # ---------------- fluxo ----------------
@@ -675,10 +706,12 @@ class IosSpike:
             params = {"using": by, "value": val}
             try:
                 if usa_executor:
-                    resp = executor.execute("findElements",
-                                            {"sessionId": self.d.session_id, **params})
+                    resp = self._consulta_cronometrada(
+                        lambda: executor.execute(
+                            "findElements", {"sessionId": self.d.session_id, **params}))
                 else:
-                    resp = self.d.execute("findElements", params)
+                    resp = self._consulta_cronometrada(
+                        lambda: self.d.execute("findElements", params))
             except Exception:                # driver falso nos testes, WDA antigo...
                 self._attrs_ok = False
                 return "erro", None

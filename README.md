@@ -176,7 +176,13 @@ python3 run_ios.py --csv contatos.csv --udid <UDID> --regiao Sudeste --excluir-d
 - Estado de UI desconhecido ⇒ para (`UI_CHANGED`), sem clicar no escuro.
 - Só seleciona **match exato e único**; ambíguo nunca é tocado.
 - Sem coordenadas fixas, sem XPath, sem esperas fixas.
-- Logs e progresso **mascarados** (hash + 2 dígitos); nunca gravam número/nome.
+- **Logs** sempre mascarados (hash + 2 dígitos): nunca mostram número nem nome.
+- **Progresso**: `progress.ios.local.json` (modo CSV) só tem hashes.
+  `progress.scroll.local.json` (Modo Scroll Livre) guarda, além dos hashes, o
+  **nome do último contato de cada lista** — é o que permite retomar na ordem
+  alfabética quando esse contato é apagado da agenda entre uma lista e outra
+  (`MODO-SCROLL-LIVRE.md`). Por isso esse arquivo é tão sensível quanto o
+  `contatos.csv`: fica só no Mac, nunca vai por e-mail, anexo ou backup em claro.
 - Criação de lista só com `--approve-create`; mínimo de 2 destinatários.
 
 ## Contatos (CSV)

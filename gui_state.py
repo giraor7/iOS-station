@@ -413,9 +413,15 @@ def pode_iniciar(itens: list[ItemProntidao], executando: bool) -> tuple[bool, st
 
 def resumo_confirmacao(fonte: Fonte, execucao: Execucao, resumo: ResumoArquivo | None,
                        ddds: list[str], contatos_filtrados: int,
-                       listas: int, ja_adicionados: int = 0) -> list[tuple[str, str]]:
+                       listas: int, ja_adicionados: int = 0,
+                       limite: int = 0) -> list[tuple[str, str]]:
     """Linhas (rotulo, valor) da caixa de confirmacao. So dados reais: o que a
-    estacao nao sabe aparece como '—', nunca como numero inventado."""
+    estacao nao sabe aparece como '—', nunca como numero inventado.
+
+    `limite` e o tamanho do ensaio escolhido (5 / 30); 0 = lista cheia. Sem
+    ele, a caixa de confirmacao da execucao REAL — o ultimo ponto humano antes
+    de a estacao mexer no WhatsApp — dizia "de ate 256 contatos" mesmo com o
+    ensaio de 5 selecionado (auditoria 2026-09-10, 3a rodada)."""
     linhas: list[tuple[str, str]] = []
     linhas.append(("Tipo de execução",
                    "Criar listas de verdade" if execucao == Execucao.REAL
@@ -439,7 +445,7 @@ def resumo_confirmacao(fonte: Fonte, execucao: Execucao, resumo: ResumoArquivo |
         linhas.append(("Fonte", "Modo Scroll Livre (sem arquivo)"))
         linhas.append(("Filtro de DDD", "não se aplica"))
         linhas.append(("Contatos", "definidos pela ordem da agenda no WhatsApp"))
-    linhas.append(("Listas", f"{listas} de até {LIMITE_LISTA} contatos"))
+    linhas.append(("Listas", f"{listas} de até {limite or LIMITE_LISTA} contatos"))
     return linhas
 
 
@@ -502,13 +508,27 @@ def etapa_humana(linha: str) -> str:
         # Auditoria 2026-09-10: desfechos que NAO sao "fim da agenda" — sem
         # isto o operador leria esses avisos como se a agenda tivesse acabado,
         # quando na verdade a estação parou por segurança no meio dela.
+        #
+        # ORDEM IMPORTA (3a rodada da auditoria): a linha real do salvamento
+        # parcial carrega o motivo grudado — "lista 1 criada PARCIAL: 9 de ate
+        # 60 contato(s) pedidos (motivo da parada: rajada interrompida)". Com
+        # "rajada interrompida" antes de "criada parcial", a ULTIMA frase que o
+        # operador via numa rodada que CRIOU uma lista era "conferindo o que foi
+        # confirmado…", uma frase de coisa em andamento no fim da execucao. O
+        # desfecho (lista criada) tem de vencer o motivo da parada.
+        ("criada parcial", "Lista criada com os contatos confirmados até aqui."),
         ("leitura vazia lenta", "A tela demorou para responder; conferindo com "
                                 "segurança antes de continuar…"),
-        ("teto de telas atingido", "Chegou ao limite de telas desta lista sem "
-                                   "esgotar a agenda; salvando o que foi confirmado…"),
+        # A linha real diz "teto de telas atingido (N telas)" no runner e
+        # "teto de telas" no motivo gravado: casar pelo trecho comum.
+        ("teto de telas", "Chegou ao limite de telas desta lista sem "
+                          "esgotar a agenda; salvando o que foi confirmado…"),
         ("rajada interrompida", "O toque em lote foi interrompido; conferindo "
                                 "o que foi confirmado…"),
-        ("criada parcial", "Lista criada com os contatos confirmados até aqui."),
+        ("ancora nao confirmada", "O botão Criar não reapareceu depois do toque "
+                                  "em lote; conferindo com segurança…"),
+        ("contato inalcancavel", "Um contato não pôde ser tocado nesta tela; "
+                                 "parei antes de deixá-lo para trás."),
     )
     for chave, frase in tabela:
         if chave in baixa:

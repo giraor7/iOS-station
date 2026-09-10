@@ -98,8 +98,23 @@ encontrar o **último contato** da lista anterior e continua do seguinte. Se
 esse contato foi apagado da agenda, continua do primeiro em ordem alfabética
 depois dele (com aviso no log).
 
-O arquivo guarda o nome do último contato selecionado — trate-o como trata o
-`contatos.csv` (fica só no Mac; o log nunca mostra nome nem número).
+O arquivo guarda o nome do último contato selecionado (campo `ultimo_rotulo`)
+— trate-o como trata o `contatos.csv`: fica só no Mac, nunca sai por e-mail,
+anexo ou backup em claro (o log nunca mostra nome nem número). O próprio JSON
+carrega esse aviso no campo `sensivel`.
+
+**Por que não dá para guardar só o hash** (dívida avaliada e mantida em
+2026-09-10): o hash já é a identidade usada na retomada; o nome é usado para
+outra coisa — a comparação **alfabética**. Quando o último contato da rodada
+anterior foi apagado da agenda, `_retomar` precisa decidir quem vem antes e
+quem vem depois dele para continuar do contato certo. Hash não ordena, e
+prefixo truncado ordena errado: com prefixo de 3 caracteres, todo mundo que
+compartilha o prefixo entra na faixa "já passou" e seria **pulado para
+sempre** (uma família inteira de nomes "Mar…", por exemplo). Entre gravar um
+nome no Mac e pular pessoas, o nome fica. O caminho que eliminaria o campo é
+outro: guardar o conjunto de hashes já usados e parar de retomar por posição
+— mudança grande, que troca o modelo de retomada inteiro e precisa de rodada
+própria.
 
 Comandos de progresso:
 
@@ -262,11 +277,13 @@ marcado, o botão Iniciar explica o que falta.
 | `nao encontrei o ponto de retomada` | O último contato mudou de nome/apagado e a ordem não bateu. `--reset-progresso` e recomece, ou use `--progress-file` novo. Antes, apague no WhatsApp as listas que seriam repetidas. |
 | `um app externo abriu durante a selecao` | Uma célula "Convidar" passou pelo filtro. Volte ao WhatsApp, feche o seletor, rode de novo (nada foi criado). |
 | `o seletor de contatos desapareceu` | WhatsApp trocou de tela (chamada, notificação, tela bloqueada). Deixe Bloqueio Automático = Nunca; rode de novo. |
+| `o WDA nao respondeu a nenhuma consulta` | Diferente do anterior: a sessão do WebDriverAgent caiu (socket hang up). A tela do iPhone pode estar intacta, com contatos marcados. Confira o aparelho, cancele o seletor e veja `TRAVOU-EM-OPENING-BROADCAST.md`. |
+| `ancora nao confirmada apos rajada turbo` | A rajada saiu e o botão "Criar" não voltou em duas conferências. Os toques dessa rajada ficam EM DÚVIDA: o progresso grava `toques_incertos` e a lista pode ter mais destinatários do que o progresso diz. **Confira no iPhone** — esses contatos podem reaparecer na lista seguinte. |
 | `botao Criar esta DESABILITADO` | Menos de 2 selecionados. Fim da agenda ou o toque não está marcando: rode o ensaio com `-v` e mande o log. |
 | `nenhuma celula de contato no seletor` | Profundidade da árvore mudou (WhatsApp novo). Rode `probe_picker.py` e mande o resultado. |
 | WDA caiu / `socket hang up` | Igual ao fluxo validado: veja `TRAVOU-EM-OPENING-BROADCAST.md`. |
-| Contato pulado | Compare o total do log com o esperado; homônimos e "sem rótulo" são contados no resumo de cada lista. |
-| `teto de telas atingido` | NÃO é fim de agenda — o filtro de DDD provavelmente é mais restritivo do que o teto previsto suporta. O teto já é elevado automaticamente quando há `--ddd`; se persistir, rode com um DDD só ou aumente `--limite-por-lista`. |
+| Contato pulado | Compare o total do log com o esperado. O resumo de cada lista imprime `homonimos ignorados`, `sem rotulo`, `cliques que falharam e foram refeitos` e `travados`; `sem rotulo` também sai como aviso separado. Desde 2026-09-10 um contato que não pode ser tocado PARA a lista (código 6) em vez de ser pulado em silêncio — ele é o próximo da fila na rodada seguinte. |
+| `teto de telas atingido` | NÃO é fim de agenda — o filtro de DDD é mais restritivo do que o teto suporta. O teto sobe sozinho quando há `--ddd`, até o teto absoluto de 1200 telas (~1 h de rodada). **Não adianta aumentar `--limite-por-lista`**: ele é o numerador da fórmula, o teto e o alvo crescem juntos. Use um DDD menos raro, quebre a agenda em arquivos menores, ou confira se o filtro está descartando por homônimo/número ausente. |
 | `leitura vazia lenta` / `rajada interrompida` | O WDA não respondeu a tempo (o sintoma do log de 2026-09-09). A lista é salva PARCIAL com o que já estava confirmado (código de saída 6) — a próxima rodada continua do contato seguinte automaticamente. Confira no iPhone o número de destinatários da lista criada. |
 
 ### Código de saída 6 — lista parcial criada
@@ -288,9 +305,14 @@ busca por célula volta **vazia e rápida**, que é indistinguível de "fim da
 agenda" pelo tempo. Por isso a reavaliação de profundidade mora dentro da
 própria leitura (`_ler_celulas`), e não no laço de seleção: no laço ela só
 seria consultada depois de uma rolagem às cegas, e os contatos daquela tela
-eram pulados em silêncio. Vale **uma vez por lista**, com orçamento de 3 s, e
-só dispara quando a busca não achou célula nenhuma — fim de agenda de verdade
-(células achadas, todas fora da área tocável) não paga nada por isso.
+eram pulados em silêncio. Vale **uma vez por lista**, com orçamento de 3 s
+conferido DEPOIS de cada busca (não só entre elas: até 2026-09-10 a primeira
+tentativa era incondicional — e ela é justamente a mais cara, numa
+profundidade MAIOR que a que acabou de travar), e só dispara quando a busca
+não achou célula nenhuma. Fim de agenda de verdade (células achadas, todas
+fora da área tocável) não paga nada por isso, e **uma leitura que já voltou
+lenta também não**: nesse caso o problema é o WDA, não a árvore, e subir a
+profundidade só aumentaria o custo da próxima varredura.
 
 **Enquanto não houver um contador de selecionados confirmado no aparelho**
 (item em aberto: nenhum candidato — botão Criar, título da NavigationBar,

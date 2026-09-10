@@ -864,10 +864,15 @@ class OperationView(ctk.CTkScrollableFrame):
 
         turbo = fonte == st.Fonte.SCROLL and bool(self._turbo_var.get())
         ensaio_txt = self._ensaio_var.get() if fonte == st.Fonte.SCROLL else st.ENSAIO_SCROLL_PADRAO
+        limite_ensaio = (st.PRESETS_ENSAIO_SCROLL.get(ensaio_txt, 0)
+                         if fonte == st.Fonte.SCROLL else 0)
         if execucao == st.Execucao.REAL:
+            # O limite do ensaio vai JUNTO: sem ele a linha "Listas" dizia
+            # "de ate 256 contatos" com o ensaio de 5 escolhido logo abaixo.
             linhas = st.resumo_confirmacao(fonte, execucao, self._resumo, ddds,
                                            filtrados, listas,
-                                           ja_adicionados=self._ja_adicionados())
+                                           ja_adicionados=self._ja_adicionados(),
+                                           limite=limite_ensaio)
             if turbo:
                 linhas.append(("Toques", "Turbo: rajada por tela"))
             if fonte == st.Fonte.SCROLL and ensaio_txt != st.ENSAIO_SCROLL_PADRAO:

@@ -11,6 +11,8 @@ ninguem e sem desmarcar ninguem.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import sys
 import tempfile
@@ -59,6 +61,20 @@ class Modelo:
         self.ocultar_ancora_apos_toques = None
         self.profundidade = None            # snapshotMaxDepth pedido pelo driver
         self.profundidade_com_chips = None  # minima que enxerga celulas COM chips
+        # ---- auditoria 2026-09-10 (3a rodada) ----
+        self.profundidades_pedidas = []     # todo snapshotMaxDepth pedido, na ordem
+        self.relogio = None                 # RelogioFalso injetado (ver rs.time)
+        self.custo_consulta = 0.0           # segundos QUE CADA consulta ao WDA custa
+        self.esvaziar_apos_toques = None    # a agenda "acaba": a busca volta vazia
+        self.wda_morto_apos_rolagens = None # toda consulta passa a levantar excecao
+        self.ancora_lenta_na_rajada = None  # rajada apos a qual o Criar demora a voltar
+        self.ancora_atraso_s = 0.0          # quanto tempo (relogio de parede) ele some
+        self._ancora_livre_em = None
+        self.derrubar_app_apos_selecionados = None   # app externo sobe no meio
+        self.falhar_clique_sempre = set()   # indices cujo click NUNCA funciona
+        self.falhar_clique_uma_vez = set()  # indices cujo click falha na 1a vez
+        self.sem_rotulo = set()             # indices cujo label/name volta vazio
+        self.chamadas_app_front = 0
 
     def tocar_em(self, x, y):
         """Toque por coordenada (rajada turbo). Se um dialogo estiver na frente,
@@ -91,6 +107,9 @@ class Modelo:
 
     def visiveis(self):
         # como o snapshot real: inclui celulas parcialmente fora da tela
+        n = self.esvaziar_apos_toques
+        if n is not None and sum(self.toques.values()) >= n:
+            return []          # a agenda acabou: a busca acha, de verdade, nada
         return [FakeCell(self, i) for i in range(len(self.nomes))
                 if self.y_de(i) + self.linha > 0 and self.y_de(i) < self.altura]
 
@@ -104,6 +123,8 @@ class FakeCell:
         return {"x": 0, "y": self.m.y_de(self.i), "width": self.m.largura, "height": self.m.linha}
 
     def get_attribute(self, a):
+        if self.i in self.m.sem_rotulo:
+            return None          # o soluco tipico deste WDA: rotulo vazio
         if a == "label":
             return f"{self.m.nomes[self.i]}, recado {self.i}"
         return None
@@ -119,6 +140,11 @@ class FakeCell:
         y = self.m.y_de(self.i)
         if y < self.m.topo - 1 or y + self.m.linha > self.m.altura:
             raise WebDriverException("element is not hittable")
+        if self.i in self.m.falhar_clique_sempre:
+            raise WebDriverException("element is not hittable")
+        if self.i in self.m.falhar_clique_uma_vez:
+            self.m.falhar_clique_uma_vez.discard(self.i)
+            raise WebDriverException("element is not hittable")
         nome = self.m.nomes[self.i]
         if "convidar" in nome.lower():
             self.m.app_front = False        # abriria o app Mensagens
@@ -128,6 +154,9 @@ class FakeCell:
             self.m.selecionados.remove(self.i)   # tocar de novo DESMARCA
         else:
             self.m.selecionados.add(self.i)
+        n = self.m.derrubar_app_apos_selecionados
+        if n is not None and len(self.m.selecionados) >= n:
+            self.m.app_front = False   # um app externo subiu no meio da selecao
 
 
 class BotaoCriar:
@@ -157,6 +186,16 @@ class FakeDriver:
     def update_settings(self, s):
         if "snapshotMaxDepth" in s:
             self.m.profundidade = s["snapshotMaxDepth"]
+            self.m.profundidades_pedidas.append(s["snapshotMaxDepth"])
+
+    def _consulta(self):
+        """Toda varredura de arvore custa tempo (e o relogio so anda aqui) e,
+        depois que a sessao morre, levanta a excecao do log de 2026-09-09."""
+        if self.m.relogio is not None:
+            self.m.relogio.agora += self.m.custo_consulta
+        n = self.m.wda_morto_apos_rolagens
+        if n is not None and self.m.rolagens >= n:
+            raise WebDriverException("socket hang up")
 
     def _profundidade_alcanca(self):
         """Arvore mais funda depois do 1o chip: e o que o modo CSV ja tinha
@@ -179,6 +218,13 @@ class FakeDriver:
         n = self.m.ocultar_ancora_apos_toques
         if n is not None and sum(self.m.toques.values()) >= n:
             return False
+        # Pico do WDA: o seletor esta INTACTO, so a consulta pelo botao Criar
+        # nao responde por alguns segundos (neste iPhone uma ja levou 33,6s).
+        if self.m._ancora_livre_em is not None:
+            import time as _t
+            if _t.monotonic() < self.m._ancora_livre_em:
+                return False
+            self.m._ancora_livre_em = None
         return True
 
     def _e_celula(self, val):
@@ -187,6 +233,7 @@ class FakeDriver:
 
     def find_elements(self, by, val):
         self.m.buscas_por_valor[val] += 1
+        self._consulta()
         if self._e_celula(val):
             # seletor fechado (dialogo/conversa por cima) = nenhuma celula na tela
             if not self.m.picker_aberto or not self._profundidade_alcanca():
@@ -199,6 +246,7 @@ class FakeDriver:
         return []
 
     def find_element(self, by, val):
+        self._consulta()
         if val == "ParticipantPickerNavigationBar_RightBarButton" and self._ancora_visivel():
             return BotaoCriar(self.m)
         raise NoSuchElementException(val)
@@ -217,7 +265,7 @@ class FakeDriver:
         """Rajada W3C (--turbo) e busca com atributos na resposta
         (elementResponseAttributes), como o WDA real."""
         if comando == "findElements":
-            achadas = self.find_elements(None, params["value"])
+            achadas = self.find_elements(None, params["value"])   # ja cobra a consulta
             if not getattr(self.m, "attrs_na_resposta", True):
                 # driver que ignora a setting: devolve so os ids
                 return {"value": [{"ELEMENT": f"cell-{c.i}"} for c in achadas]}
@@ -255,11 +303,15 @@ class FakeDriver:
                         raise WebDriverException("socket hang up")
                     self.m.tocar_em(x, y)
                     tocados_nesta_rajada += 1
+        if self.m.ancora_lenta_na_rajada == numero_rajada:
+            import time as _t
+            self.m._ancora_livre_em = _t.monotonic() + self.m.ancora_atraso_s
         return {"value": None}
 
     def execute_script(self, name, args=None):
         args = args or {}
         if name == "mobile: activeAppInfo":
+            self.m.chamadas_app_front += 1
             return {"bundleId": BUNDLE_ID if self.m.app_front else "com.apple.MobileSMS"}
         if name == "mobile: dragFromToWithVelocity":
             self.m.rolar(args["fromY"] - args["toY"])
@@ -268,6 +320,98 @@ class FakeDriver:
             self.m.rolar(self.m.altura * 2.5 if args.get("direction") == "up" else -self.m.altura * 2.5)
             return None
         raise WebDriverException(name)
+
+
+class RelogioFalso:
+    """Relogio injetavel (entra no lugar do modulo `time` de run_ios_scroll e
+    de spike_ios). So anda quando o driver falso GASTA tempo numa consulta ao
+    WDA — assim o teste mede exatamente o que o codigo mede, sem depender do
+    relogio de parede. O resto da API do modulo `time` continua valendo."""
+
+    def __init__(self):
+        import time as _t
+        self._real = _t
+        self.agora = 0.0
+
+    def monotonic(self):
+        return self.agora
+
+    def sleep(self, s):
+        self.agora += max(0.0, float(s))
+
+    def __getattr__(self, nome):
+        return getattr(self.__dict__["_real"], nome)
+
+
+def com_relogio(m):
+    """Injeta o relogio falso em run_ios_scroll e spike_ios (as duas metades da
+    leitura de tela) e devolve um contexto."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _ctx():
+        m.relogio = RelogioFalso()
+        originais = (rs.time, spike_ios.time)
+        rs.time = m.relogio
+        spike_ios.time = m.relogio
+        try:
+            yield m.relogio
+        finally:
+            rs.time, spike_ios.time = originais
+    return _ctx()
+
+
+def rodar_main(m, argv, path):
+    """Roda rs.main() DE VERDADE com o FakeDriver no lugar do Appium."""
+    driver = FakeDriver(m)
+    orig = {
+        "build": rs.build_driver, "exigir": spike_ios.exigir_appium,
+        "abrir": rs.ScrollLivre.open_new_broadcast,
+        "voltar": rs.ScrollLivre.voltar_para_conversas,
+        "dump": rs._dump_inventory_on_fail, "argv": sys.argv,
+    }
+    rs.build_driver = lambda *a, **k: driver
+    spike_ios.exigir_appium = lambda *a, **k: True
+    rs.ScrollLivre.open_new_broadcast = lambda self: None
+    rs.ScrollLivre.voltar_para_conversas = lambda self: None
+    rs._dump_inventory_on_fail = lambda *a, **k: None
+    sys.argv = ["run_ios_scroll.py", "--progress-file", path] + argv
+    try:
+        return rs.main()
+    finally:
+        rs.build_driver = orig["build"]
+        spike_ios.exigir_appium = orig["exigir"]
+        rs.ScrollLivre.open_new_broadcast = orig["abrir"]
+        rs.ScrollLivre.voltar_para_conversas = orig["voltar"]
+        rs._dump_inventory_on_fail = orig["dump"]
+        sys.argv = orig["argv"]
+
+
+class CapturaLog(logging.Handler):
+    """Guarda as linhas REAIS que o runner emite (nao strings fabricadas pelo
+    teste): e o unico jeito de conferir que o resumo imprime o que promete e
+    que a GUI traduz o que o programa de fato escreve."""
+
+    def __init__(self):
+        super().__init__()
+        self.linhas = []
+
+    def emit(self, record):
+        self.linhas.append(f"{record.levelname} {record.getMessage()}")
+
+    def __enter__(self):
+        logging.getLogger().addHandler(self)
+        logging.getLogger("scroll_livre").addHandler(self)
+        return self
+
+    def __exit__(self, *exc):
+        logging.getLogger().removeHandler(self)
+        logging.getLogger("scroll_livre").removeHandler(self)
+        return False
+
+    @property
+    def texto(self):
+        return "\n".join(self.linhas)
 
 
 def nomes_ordenados(n):
@@ -806,25 +950,85 @@ class LeituraVaziaLenta(unittest.TestCase):
         self.path = os.path.join(tempfile.mkdtemp(), "p.json")
 
     def test_leitura_vazia_lenta_nao_e_tratada_como_fim_de_agenda(self):
+        """Reescrito em 2026-09-10 (3a rodada). O teste antigo substituia
+        `_ler_celulas` inteiro por um stub que ESCREVIA `rs.LEITURA_LENTA_S + 1`
+        no proprio cronometro: passava para QUALQUER valor da constante (com
+        LEITURA_LENTA_S = 1e9 os 54 testes continuavam verdes) e nunca
+        atravessava a medicao de verdade. Agora o tempo vem de um relogio
+        injetavel que so anda quando o driver falso gasta tempo numa consulta,
+        e a fronteira e um numero FIXO (9,0s por consulta), nao derivado da
+        constante que esta sendo testada."""
         nomes = nomes_ordenados(50)
         m, sp = novo(nomes, limite=30)
-        original = sp._ler_celulas
-
-        def sempre_vazia_e_lenta(margem=rs.MARGEM_INFERIOR):
-            sp._duracoes_leitura.append(rs.LEITURA_LENTA_S + 1)
-            return []
-
-        def troca_apos_5_confirmados(margem=rs.MARGEM_INFERIOR):
-            if len(sp.ordem) >= 5:
-                sp._ler_celulas = sempre_vazia_e_lenta
-                return sempre_vazia_e_lenta(margem)
-            return original(margem)
-
-        sp._ler_celulas = troca_apos_5_confirmados
-        qtd = sp.selecionar(rs.Progresso(self.path))
+        m.esvaziar_apos_toques = 5     # a busca volta vazia DE VERDADE
+        m.custo_consulta = 9.0         # cada consulta ao WDA custa 9s (> 7,5)
+        with com_relogio(m):
+            qtd = sp.selecionar(rs.Progresso(self.path))
         self.assertGreaterEqual(qtd, 5)
         self.assertLess(qtd, 30)
         self.assertEqual(sp.parada, "leitura vazia lenta (nao e fim de agenda)")
+
+    def test_vazio_rapido_e_fim_de_agenda_de_verdade(self):
+        """O unico desfecho NAO-abortivo de uma tela vazia (`dur <
+        LEITURA_RAPIDA_S` => fim da agenda) nao era executado uma unica vez em
+        toda a suite: trocar essa linha por um sys.exit deixava os 54 testes
+        verdes. Aqui ele roda, com relogio de verdade."""
+        nomes = nomes_ordenados(50)
+        m, sp = novo(nomes, limite=30)
+        m.esvaziar_apos_toques = 5
+        m.custo_consulta = 0.05        # aparelho saudavel
+        with com_relogio(m):
+            qtd = sp.selecionar(rs.Progresso(self.path))
+        self.assertGreaterEqual(qtd, 5)
+        self.assertLess(qtd, 30)
+        self.assertEqual(sp.parada, "")
+        self.assertLess(sp._duracoes_leitura[-1], rs.LEITURA_RAPIDA_S)
+
+    def test_soma_de_consultas_rapidas_nao_pode_virar_falha_de_leitura(self):
+        """LEITURA_LENTA_S = 7,5s foi calibrado como "metade do
+        customSnapshotTimeout", isto e, o tempo de UMA consulta. O cronometro
+        media o BLOCO inteiro (ate 7-8 varreduras + re-escalada de
+        profundidade): num aparelho saudavel de 2s por consulta a soma passava
+        de 14s e a lista saia PARCIAL sem nenhuma consulta ter sido lenta."""
+        nomes = nomes_ordenados(50)
+        m, sp = novo(nomes, limite=30)
+        m.esvaziar_apos_toques = 5
+        m.custo_consulta = 1.5         # cada consulta e RAPIDA (< 2,0); a soma nao
+        with com_relogio(m):
+            qtd = sp.selecionar(rs.Progresso(self.path))
+        self.assertEqual(sp.parada, "", "a soma do bloco virou 'falha de leitura'")
+        self.assertGreaterEqual(qtd, 5)
+        self.assertLess(max(sp._duracoes_leitura), rs.LEITURA_LENTA_S,
+                        "o cronometro voltou a somar varias consultas numa so leitura")
+
+    def test_wda_morto_nao_e_relatado_como_seletor_sumido(self):
+        """Log de 2026-09-09: leitura vazia em 33,6s e a chamada seguinte morre
+        com socket hang up. Nesse estado o in_picker() engole as excecoes e
+        devolve False — o operador lia "o seletor de contatos desapareceu"
+        (afirmacao sobre a TELA) quando o que caiu foi o WDA, com N contatos
+        marcados no iPhone. Quem decide primeiro tem de ser o RELOGIO."""
+        nomes = nomes_ordenados(50)
+        m, sp = novo(nomes, limite=30)
+        m.custo_consulta = 9.0
+        m.wda_morto_apos_rolagens = 1   # a sessao morre depois da 1a rolagem
+        with com_relogio(m):
+            qtd = sp.selecionar(rs.Progresso(self.path))   # NAO pode levantar
+        self.assertGreater(qtd, 0)
+        self.assertEqual(sp.parada, "leitura vazia lenta (nao e fim de agenda)")
+
+    def test_nao_sobe_a_profundidade_depois_de_consulta_lenta(self):
+        """O "orcamento de 3s" da re-escalada nao limitava nada: a primeira
+        tentativa era incondicional e subia snapshotMaxDepth JUSTO DEPOIS da
+        varredura que travou — mais funda que a que travou."""
+        nomes = nomes_ordenados(50)
+        m, sp = novo(nomes, limite=30)
+        m.esvaziar_apos_toques = 5
+        m.custo_consulta = 9.0
+        with com_relogio(m):
+            sp.selecionar(rs.Progresso(self.path))
+        self.assertTrue(m.profundidades_pedidas)
+        self.assertEqual(max(m.profundidades_pedidas), 12,
+                         "a re-escalada disparou depois de uma consulta lenta")
 
     def test_leitura_vazia_rapida_continua_sendo_fim_de_agenda(self):
         """O caminho feliz de sempre (agenda menor que o limite) nao pode
@@ -923,29 +1127,7 @@ class MainSalvamentoParcial(unittest.TestCase):
         self.path = os.path.join(self.dir, "p.json")
 
     def _rodar(self, m, argv):
-        """Roda rs.main() com o FakeDriver no lugar do Appium."""
-        driver = FakeDriver(m)
-        orig = {
-            "build": rs.build_driver, "exigir": spike_ios.exigir_appium,
-            "abrir": rs.ScrollLivre.open_new_broadcast,
-            "voltar": rs.ScrollLivre.voltar_para_conversas,
-            "dump": rs._dump_inventory_on_fail, "argv": sys.argv,
-        }
-        rs.build_driver = lambda *a, **k: driver
-        spike_ios.exigir_appium = lambda *a, **k: True
-        rs.ScrollLivre.open_new_broadcast = lambda self: None
-        rs.ScrollLivre.voltar_para_conversas = lambda self: None
-        rs._dump_inventory_on_fail = lambda *a, **k: None
-        sys.argv = ["run_ios_scroll.py", "--progress-file", self.path] + argv
-        try:
-            return rs.main()
-        finally:
-            rs.build_driver = orig["build"]
-            spike_ios.exigir_appium = orig["exigir"]
-            rs.ScrollLivre.open_new_broadcast = orig["abrir"]
-            rs.ScrollLivre.voltar_para_conversas = orig["voltar"]
-            rs._dump_inventory_on_fail = orig["dump"]
-            sys.argv = orig["argv"]
+        return rodar_main(m, argv, self.path)
 
     def test_rajada_morre_no_meio_cria_parcial_e_avanca_so_o_confirmado(self):
         m = Modelo(nomes_ordenados(60))
@@ -1026,6 +1208,327 @@ class MainSalvamentoParcial(unittest.TestCase):
         prog = rs.Progresso(self.path)
         self.assertEqual(prog.offset, 20)
         self.assertEqual(sorted(m.selecionados), list(range(20)))
+
+
+# ---------------------------------------------------------------------------
+# auditoria 2026-09-10 (3a rodada): o que o diff bb40263 deixou passar
+# ---------------------------------------------------------------------------
+
+class AncoraLentaDepoisDaRajada(unittest.TestCase):
+    """A rajada JA PEGOU no aparelho e a conferencia da ancora demora 2s: com
+    UMA unica consulta de 2s como prova, o codigo declarava "o seletor sumiu",
+    o main() reencontrava a ancora tres linhas depois e criava a lista MAIOR do
+    que o progresso registrava — e a rodada seguinte mandava a transmissao duas
+    vezes para essas pessoas, sem nada no progresso registrando a duvida."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "p.json")
+
+    def test_pico_do_wda_nao_derruba_a_lista(self):
+        m = Modelo(nomes_ordenados(60))
+        m.ancora_lenta_na_rajada = 2      # depois da 2a rajada o Criar some...
+        m.ancora_atraso_s = 3.0           # ...por 3s (o seletor esta INTACTO)
+        codigo = rodar_main(m, ["--trust-profile", "--approve-create", "--turbo",
+                                "--limite-por-lista", "20", "--max-listas", "1"],
+                            self.path)
+        self.assertEqual(codigo, 0, "um pico do WDA virou lista parcial")
+        prog = rs.Progresso(self.path)
+        self.assertEqual(prog.offset, 20)
+        self.assertEqual(sorted(m.selecionados), list(range(20)),
+                         "o aparelho tem uma lista diferente da que o progresso descreve")
+
+    def test_ancora_que_nao_volta_registra_a_duvida_e_nao_mente(self):
+        """Quando ela NAO volta, a lista pode ter mais gente do que a estacao
+        consegue descrever. O progresso tem de registrar a duvida, e a mensagem
+        gravada nao pode afirmar 'esta lista nao foi criada' — main() cria."""
+        m = Modelo(nomes_ordenados(60))
+        m.ocultar_ancora_apos_toques = 15   # some de vez no meio da lista
+        orig_sel = rs.ScrollLivre.selecionar
+
+        def devolver_a_ancora(sp, prog):
+            try:
+                return orig_sel(sp, prog)
+            finally:
+                m.ocultar_ancora_apos_toques = None   # volta a tempo do main()
+        rs.ScrollLivre.selecionar = devolver_a_ancora
+        try:
+            codigo = rodar_main(m, ["--trust-profile", "--approve-create", "--turbo",
+                                    "--limite-por-lista", "60", "--max-listas", "1"],
+                                self.path)
+        finally:
+            rs.ScrollLivre.selecionar = orig_sel
+        self.assertEqual(codigo, 6)
+        prog = rs.Progresso(self.path)
+        ultimo = prog.historico[-1]
+        self.assertTrue(ultimo["parcial"])
+        self.assertTrue(ultimo.get("toques_incertos"),
+                        "a lista pode ter mais gente do que o progresso diz e nada "
+                        "registra a duvida")
+        self.assertNotIn("nao foi criada", ultimo["motivo_da_parada"],
+                         "o progresso afirma que a lista nao foi criada — e ela foi")
+        self.assertIn("conferir_no_iphone", ultimo)
+
+
+class FallbackDaRajadaNaoDescartaContato(unittest.TestCase):
+    """No fallback do --turbo (driver que recusa 'actions'), uma unica falha de
+    clique descartava a celula sem NENHUMA retentativa — e como o progresso
+    avanca pelo ultimo contato tocado, aquele contato ficava atras do ponto de
+    retomada para sempre. O caminho por elemento normal retenta duas vezes."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "p.json")
+
+    def test_uma_falha_de_clique_no_fallback_nao_abre_buraco(self):
+        m = Modelo(nomes_ordenados(60))
+        m.aceita_w3c = False              # a 1a rajada da lista cai no fallback
+        m.falhar_clique_uma_vez = {4}     # um "element is not hittable" passageiro
+        codigo = rodar_main(m, ["--trust-profile", "--approve-create", "--turbo",
+                                "--limite-por-lista", "20", "--max-listas", "1"],
+                            self.path)
+        self.assertEqual(codigo, 0)
+        self.assertEqual(sorted(m.selecionados), list(range(20)),
+                         "a celula que falhou uma vez foi descartada em silencio")
+        prog = rs.Progresso(self.path)
+        self.assertEqual(prog.offset, 20)
+        self.assertEqual(prog.ultimo_hash, rs.hash_nome("Contato 0019"))
+
+    def test_o_que_ja_pegou_na_rajada_nunca_e_re_tocado(self):
+        """A retentativa so pode tocar QUEM FALHOU: re-tocar quem ja entrou
+        desmarcaria o contato."""
+        m = Modelo(nomes_ordenados(60))
+        m.aceita_w3c = False
+        m.falhar_clique_uma_vez = {4}
+        rodar_main(m, ["--trust-profile", "--approve-create", "--turbo",
+                       "--limite-por-lista", "20", "--max-listas", "1"], self.path)
+        self.assertTrue(all(v == 1 for v in m.toques.values()),
+                        "algum contato foi tocado 2x (isso o DESMARCA)")
+
+
+class ContatoTravadoNaoEPulado(unittest.TestCase):
+    """DIVIDA (B). Uma celula que falha 2x na mesma tela era abandonada com um
+    `continue` mudo: os contatos SEGUINTES eram tocados, o progresso avancava
+    por eles, e aquele contato ficava atras do ponto de retomada — em nenhuma
+    lista, em nenhuma rodada."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "p.json")
+
+    def test_para_antes_de_ultrapassar_o_contato_travado(self):
+        m = Modelo(nomes_ordenados(60))
+        m.falhar_clique_sempre = {7}      # celula inalcancavel de verdade
+        codigo = rodar_main(m, ["--trust-profile", "--approve-create",
+                                "--limite-por-lista", "20", "--max-listas", "1"],
+                            self.path)
+        self.assertEqual(codigo, 6, "a lista seguiu por cima do contato travado")
+        self.assertEqual(sorted(m.selecionados), list(range(7)),
+                         "tocou em contatos DEPOIS do travado: ele fica para tras")
+        prog = rs.Progresso(self.path)
+        self.assertEqual(prog.offset, 7)
+        # o ponto de retomada e o contato ANTERIOR ao travado: na proxima lista
+        # o travado e o proximo da fila (nunca pulado, nunca duplicado).
+        self.assertEqual(prog.ultimo_hash, rs.hash_nome("Contato 0006"))
+        self.assertIn("inalcancavel", prog.historico[-1]["motivo_da_parada"])
+
+    def test_conta_e_nomeia_o_travamento(self):
+        nomes = nomes_ordenados(60)
+        m, sp = novo(nomes, limite=20)
+        m.falhar_clique_sempre = {7}
+        with self.assertRaises(spike_ios.UiChanged):
+            sp.selecionar(rs.Progresso(self.path))
+        self.assertEqual(sp.stats["travados"], 1)
+        self.assertEqual(sp.parada,
+                         "contato inalcancavel (2 falhas de toque na mesma tela)")
+
+
+class TravaDeAppEmPrimeiroPlano(unittest.TestCase):
+    """A trava de app-em-primeiro-plano sobrevivia so pela ordem de duas linhas
+    dentro de _checar_seguranca: trocando-as (a refatoracao mais natural do
+    mundo) a estacao seguia tocando dezenas de vezes com outro app na frente e
+    os 54 testes continuavam verdes."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def test_app_externo_para_a_selecao_dentro_de_uma_rajada(self):
+        nomes = nomes_ordenados(200)
+        m, sp = novo(nomes, limite=100)
+        sp.turbo = True
+        m.derrubar_app_apos_selecionados = 7   # um app externo sobe no meio
+        with self.assertRaises(spike_ios.UiChanged):
+            sp.selecionar(rs.Progresso(self.path))
+        self.assertLessEqual(sum(m.toques.values()), 7 + rs.MAX_LOTE_TURBO,
+                             "a estacao continuou tocando com outro app na frente")
+
+    def test_a_checagem_de_app_nao_e_pulavel_pela_ancora_confirmada(self):
+        """Mesmo com a ancora ja provada por uma rajada desta tela, a checagem
+        de app em primeiro plano tem de acontecer."""
+        nomes = nomes_ordenados(20)
+        m, sp = novo(nomes, limite=10)
+        m.app_front = False
+        with self.assertRaises(spike_ios.UiChanged):
+            sp._checar_seguranca(ancora_ja_confirmada=True)
+
+
+class ParcialQueNaoConsegueCriar(unittest.TestCase):
+    """No salvamento parcial, se o finish() falhar DEPOIS de achar o seletor,
+    nada pode ser marcado como criado. Um mutante que ignorava a excecao e
+    marcava sucesso do mesmo jeito passava os 54 testes."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "p.json")
+
+    def test_finish_que_falha_nao_avanca_progresso(self):
+        m = Modelo(nomes_ordenados(60))
+        m.falha_na_rajada_numero = 3
+        m.falha_apos_k_toques = 3
+        orig_finish = rs.ScrollLivre.finish
+
+        def finish_que_falha(sp, approve_create):
+            raise spike_ios.UiChanged("Criar desabilitado (simulado)")
+        rs.ScrollLivre.finish = finish_que_falha
+        try:
+            codigo = rodar_main(m, ["--trust-profile", "--approve-create", "--turbo",
+                                    "--limite-por-lista", "60", "--max-listas", "1"],
+                                self.path)
+        finally:
+            rs.ScrollLivre.finish = orig_finish
+        self.assertNotEqual(codigo, 6, "marcou como criada uma lista que nao foi criada")
+        self.assertEqual(codigo, 4)
+        prog = rs.Progresso(self.path)
+        self.assertEqual(prog.listas_criadas, 0)
+        self.assertEqual(prog.offset, 0)
+        self.assertEqual(prog.historico, [])
+
+
+class TetoDeTelasChegaNoScrollLivre(unittest.TestCase):
+    """teto_telas_para() e testado sozinho e ScrollLivre.max_telas e testado
+    sozinho — mas nada garantia que o valor calculado CHEGA ao construtor.
+    Tirar `max_telas=max_telas` da chamada em main() deixava tudo verde."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "p.json")
+        self.agenda = os.path.join(self.dir, "agenda.csv")
+        linhas = ["name,phone"]
+        for i in range(200):
+            ddd = "21" if i < 4 else "11"     # 2% no DDD 21: filtro restritivo
+            linhas.append(f"Contato {i:04d},+55{ddd}9{i:08d}")
+        with open(self.agenda, "w", encoding="utf-8") as f:
+            f.write("\n".join(linhas))
+
+    def test_o_teto_calculado_chega_ao_construtor(self):
+        capturado = []
+        orig_init = rs.ScrollLivre.__init__
+
+        def init_espiao(sp, driver, profile, limite=256, max_telas=rs.MAX_TELAS_POR_LISTA):
+            capturado.append(max_telas)
+            orig_init(sp, driver, profile, limite=limite, max_telas=max_telas)
+        rs.ScrollLivre.__init__ = init_espiao
+        try:
+            rodar_main(Modelo(nomes_ordenados(60)),
+                       ["--trust-profile", "--limite-por-lista", "256",
+                        "--ddd", "21", "--agenda", self.agenda], self.path)
+        finally:
+            rs.ScrollLivre.__init__ = orig_init
+        filtro = rs.permitidos_por_ddd(self.agenda, "21", "BR")
+        esperado = rs.teto_telas_para(256, filtro)
+        self.assertTrue(capturado)
+        self.assertEqual(capturado[0], esperado)
+        self.assertGreater(esperado, rs.MAX_TELAS_POR_LISTA)
+
+
+class TetoAbsoluto(unittest.TestCase):
+    """O teto dinamico nao tinha limite por cima: com filtro de 1% ele valia
+    6.656 telas — 5 a 6 HORAS de rodada, sem aviso nenhum ao operador."""
+
+    def test_magnitude_exata_do_teto_derivado(self):
+        filtro = {"permitidos": set(range(100)), "nomes": 1000}   # 1 em 10
+        self.assertEqual(rs.teto_telas_para(256, filtro), 666)
+
+    def test_filtro_raro_nao_passa_do_teto_absoluto(self):
+        filtro = {"permitidos": set(range(40)), "nomes": 5000}    # 0,8% => clamp
+        self.assertEqual(rs.teto_telas_para(256, filtro), rs.TETO_TELAS_ABSOLUTO)
+        self.assertEqual(rs.TETO_TELAS_ABSOLUTO, 1200)
+
+
+class ResumoDaListaMostraOQuePromete(unittest.TestCase):
+    """stats['sem_rotulo'] era escrito e NUNCA lido — enquanto a tabela de
+    diagnostico do MODO-SCROLL-LIVRE.md mandava o operador procurar esse numero
+    no resumo de cada lista. O operador procurava um numero que nao existia."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "p.json")
+
+    def test_sem_rotulo_aparece_no_resumo(self):
+        m = Modelo(nomes_ordenados(60))
+        m.sem_rotulo = {11}
+        with CapturaLog() as cap:
+            rodar_main(m, ["--trust-profile", "--approve-create",
+                           "--limite-por-lista", "20", "--max-listas", "1"], self.path)
+        self.assertIn("sem rotulo", cap.texto.lower())
+        self.assertIn("SEM ROTULO", cap.texto,
+                      "o descarte por rotulo vazio nao foi avisado ao operador")
+
+    def test_frase_final_de_uma_lista_parcial_e_a_de_lista_criada(self):
+        """A linha real carrega o motivo grudado ("... (motivo da parada:
+        rajada interrompida)"). Com a tabela de etapa_humana na ordem antiga, a
+        ULTIMA frase mostrada ao operador numa rodada que CRIOU uma lista era
+        "conferindo o que foi confirmado…"."""
+        import gui_state as st
+        m = Modelo(nomes_ordenados(60))
+        m.falha_na_rajada_numero = 3
+        m.falha_apos_k_toques = 3
+        with CapturaLog() as cap:
+            codigo = rodar_main(m, ["--trust-profile", "--approve-create", "--turbo",
+                                    "--limite-por-lista", "60", "--max-listas", "1"],
+                                self.path)
+        self.assertEqual(codigo, 6)
+        parciais = [l for l in cap.linhas if "criada PARCIAL" in l]
+        self.assertTrue(parciais, "o runner nao emitiu a linha de lista parcial")
+        self.assertIn("motivo da parada", parciais[-1],
+                      "a linha real sempre carrega o motivo grudado")
+        self.assertEqual(st.etapa_humana(parciais[-1]),
+                         "Lista criada com os contatos confirmados até aqui.")
+
+
+class ProgressoNaoVazaMaisDoQueOCombinado(unittest.TestCase):
+    """DIVIDA (A). O arquivo de progresso guarda o NOME do ultimo contato de
+    cada lista — e isso e necessario para retomar (a comparacao alfabetica de
+    _retomar quando o contato foi apagado da agenda). O que NAO pode e o
+    README afirmar o contrario, nem o arquivo guardar mais do que isso."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def test_arquivo_guarda_so_o_ultimo_nome_e_se_declara_sensivel(self):
+        p = rs.Progresso(self.path)
+        p.registrar_lista(3, rs.hash_nome("Ana"), rs.hash_nome("Carlos"), "Carlos")
+        bruto = open(self.path, encoding="utf-8").read()
+        d = json.loads(bruto)
+        self.assertEqual(d["ultimo_rotulo"], "Carlos")
+        self.assertNotIn("Ana", bruto, "nome de contato ANTERIOR gravado no arquivo")
+        self.assertNotIn("recado", bruto, "recado/status do contato gravado no arquivo")
+        self.assertIn("sensivel", d)
+        self.assertIn("contatos.csv", d["sensivel"])
+
+    def test_readme_nao_afirma_que_o_progresso_nao_grava_nome(self):
+        base = os.path.dirname(os.path.abspath(__file__))
+        readme = open(os.path.join(base, "README.md"), encoding="utf-8").read()
+        # a frase que o README trazia ate 2026-09-10 e que o codigo nunca
+        # sustentou (o progresso do Scroll Livre grava o nome do ultimo contato)
+        self.assertNotIn("progresso **mascarados**", readme)
+        self.assertNotIn("nunca gravam número/nome", readme)
+        self.assertIn("progress.scroll.local.json", readme)
+        trecho = readme[readme.index("progress.scroll.local.json"):][:600].lower()
+        self.assertIn("nome do último contato", trecho,
+                      "o README precisa dizer que o progresso do Scroll Livre guarda "
+                      "o nome do ultimo contato (e o que o codigo faz)")
+        self.assertIn("contatos.csv", trecho)
 
 
 if __name__ == "__main__":
