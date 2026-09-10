@@ -153,6 +153,14 @@ class IosSpike:
         # verificacao de selecao, os dois contatos se perdem em silencio.
         self._rotulo_anterior_h: str | None = None
         self.colisoes = 0
+        self._motivo = ""              # porque o ultimo contato nao foi aceito
+        # Este picker mostra o numero dentro da celula? Aprendido no 1o contato
+        # de cada lista (None = ainda nao se sabe).
+        self._tem_filho_telefone: bool | None = None
+        # Conferir o campo de busca apos digitar so faz sentido quando a
+        # digitacao foi acelerada (LL_DIGITACAO): e ai que ela pode perder
+        # caractere. Custa 1 leitura por contato.
+        self._conferir_digitacao = os.environ.get("LL_DIGITACAO", "").isdigit()
         # True somente depois do toque em "Criar" (finish). E isto que o runner
         # grava como lista concluida — nao o estado COMPLETED, que tambem e
         # usado quando nao havia o que criar (menos de 2 selecionados).
@@ -309,6 +317,7 @@ class IosSpike:
         self._search_box = None
         self._camada_ok.clear()
         self._rotulo_anterior_h = None
+        self._tem_filho_telefone = None
         self._contatos_desde_check = self._CHECAR_INTERVALO
         # A sessao abre VAZIA (autoLaunch=False). Ativa o WhatsApp apenas se
         # ele nao estiver ja em frente — chamar activate_app com o app ja ativo
@@ -450,78 +459,131 @@ class IosSpike:
         query = e164 or name
         if not query:
             return None
+        self._motivo = ""
         self._type_query(query)
+        if not self._digitou_certo(query):
+            # So confere quando LL_DIGITACAO esta ligado (ver _digitou_certo).
+            self._motivo = "o texto digitado no campo de busca nao conferiu"
+            return None
         self.settle()
 
-        cells = self._find_cells_escalating()
-        # Diagnostico barato e decisivo: 0 celulas = a busca nao filtrou (texto
-        # digitado errado/incompleto?); 2+ = ha celulas a mais na tela (chips?).
-        log.info("busca: %d celula(s) na tela", len(cells))
-        if not cells:
-            if self.in_picker():
-                return None  # simplesmente nao ha resultado
-            raise UiChanged("o seletor de contatos desapareceu durante a busca")
+        # Duas passadas no maximo: a segunda so acontece quando a unica celula da
+        # tela e a MESMA do contato anterior (a lista pode nao ter refiltrado
+        # ainda) — ai vale esperar e reler antes de decidir.
+        for passada in (1, 2):
+            cells = self._find_cells_escalating()
+            # Diagnostico barato e decisivo: 0 celulas = a busca nao filtrou
+            # (texto digitado errado/incompleto?); 2+ = celulas a mais (chips?).
+            log.info("busca: %d celula(s) na tela", len(cells))
+            if not cells:
+                if self.in_picker():
+                    return None  # simplesmente nao ha resultado
+                raise UiChanged("o seletor de contatos desapareceu durante a busca")
 
-        # ATALHO (uma celula, busca por numero): o filho do telefone nao muda a
-        # decisao. Se casar, esta celula e a escolhida; se nao casar — ou nao
-        # existir, como neste iPhone — o single-cell-trust logo abaixo escolhe a
-        # MESMA celula. Era uma consulta HTTP por contato que nao decidia nada.
-        # Com 2+ celulas o telefone decide qual e a certa e continua sendo lido.
-        if not (e164 and len(cells) == 1):
-            exact = self._exact_matches(cells, e164, name)
-            if len(exact) > 1:
-                raise Ambiguous(len(exact))
-            if exact:
-                return exact[0]
+            # ATALHO (uma celula, busca por numero, e ESTE picker nao expoe o
+            # numero dentro da celula): o filho do telefone nao muda a decisao —
+            # se casasse, escolheria a mesma celula que o single-cell-trust
+            # escolhe logo abaixo. Era uma consulta HTTP por contato que nao
+            # decidia nada. Onde o filho EXISTE ele continua sendo lido, porque
+            # ali a conferencia por numero e dura; e com 2+ celulas e ele que
+            # decide qual e a certa.
+            atalho = (e164 and len(cells) == 1
+                      and self._filho_telefone_existe(cells[0]) is False)
+            if not atalho:
+                exact = self._exact_matches(cells, e164, name)
+                if len(exact) > 1:
+                    raise Ambiguous(len(exact))
+                if exact:
+                    return exact[0]
 
-        # FALLBACK — single-cell trust:
-        # O WhatsApp ja filtrou a lista pelo numero que digitamos (E.164).
-        # Se sobrou EXATAMENTE 1 celula e a busca foi por numero, esse e o
-        # contato certo — mas SOMENTE se nao for celula de convite.
-        if e164 and len(cells) == 1 and not self._is_invite_cell(cells[0]):
-            if self._mesma_celula_de_antes(cells[0]):
-                return None
-            log.debug("single-cell-trust: 1 celula apos busca por E.164 "
-                      "— formato exibido nao casou, mas o WhatsApp ja filtrou")
-            cells[0]._sct = True  # atributo dinamico lido em search_and_select
-            return cells[0]
+            # FALLBACK — single-cell trust:
+            # O WhatsApp ja filtrou a lista pelo numero que digitamos (E.164).
+            # Se sobrou EXATAMENTE 1 celula e a busca foi por numero, esse e o
+            # contato certo — mas SOMENTE se nao for celula de convite.
+            if e164 and len(cells) == 1 and not self._is_invite_cell(cells[0]):
+                if self._rotulo_repetido(cells[0]):
+                    if passada == 1:
+                        # Pode ser a celula do contato anterior ainda na tela.
+                        self.colisoes += 1
+                        self.settle(1.5)         # deixa a lista refiltrar
+                        continue                 # rele e decide na 2a passada
+                    if self._parece_marcada(cells[0]):
+                        log.warning("celula identica a do contato anterior e ja "
+                                    "marcada: nao toco de novo (a lista nao "
+                                    "refiltrou a tempo)")
+                        self._motivo = ("mesma celula do contato anterior, ja marcada "
+                                        "— nao cliquei para nao desmarcar")
+                        return None
+                    log.warning("mesmo rotulo do contato anterior, sem marca de "
+                                "selecao: tratando como contato distinto (homonimo "
+                                "ou segundo numero da mesma pessoa)")
+                log.debug("single-cell-trust: 1 celula apos busca por E.164 "
+                          "— formato exibido nao casou, mas o WhatsApp ja filtrou")
+                cells[0]._sct = True  # atributo dinamico lido em search_and_select
+                return cells[0]
 
+            return None
         return None
 
+    def _digitou_certo(self, query: str) -> bool:
+        """Confere que o campo de busca contem exatamente o que foi digitado.
 
-    def _mesma_celula_de_antes(self, cell) -> bool:
-        """A unica celula na tela e a MESMA que acabamos de selecionar?
+        Custa 1 leitura (~0,05 s) e SO roda quando LL_DIGITACAO esta ligado: a
+        digitacao acelerada pode perder caractere, e o WDA nao confere o que
+        digitou. Com um caractere a menos a busca vira um PREFIXO do numero, o
+        WhatsApp continua filtrando e, se sobrar uma celula, ela seria aceita
+        pelo single-cell-trust — podendo ser outro contato. Sem a chave ligada
+        nao ha custo: a digitacao segue na velocidade padrao do WDA."""
+        if not self._conferir_digitacao or self._search_box is None:
+            return True
+        try:
+            valor = (self._search_box.get_attribute("value") or "").strip()
+        except WebDriverException:
+            return True                       # sem leitura, segue como antes
+        if not valor:
+            return True                       # campo sem 'value' util neste app
+        so_digitos = "".join(c for c in valor if c.isdigit())
+        alvo = "".join(c for c in query if c.isdigit())
+        if so_digitos == alvo:
+            return True
+        log.warning("o campo de busca nao contem o numero inteiro (digitacao "
+                    "acelerada perdeu caractere?): contato ignorado, sem clique")
+        return False
 
-        Neste iPhone o rotulo e "Nome, recado" e nao contem o numero, entao
-        todo contato entra por single-cell-trust: se a lista ainda nao tiver
-        refiltrado, tocariamos de novo na celula anterior — o que a DESMARCA e
-        perde dois contatos em silencio (sem --approve-create nao ha verificacao
-        de selecao). Custo no caminho normal: 0 chamadas (o rotulo ja foi lido).
-        So na coincidencia paga uma espera e uma releitura."""
+    def _filho_telefone_existe(self, cell):
+        """Este picker mostra o numero dentro da celula? Aprendido UMA vez por
+        picker: no iPhone da operadora o filho PickerView_ContactCell_PhoneNumber
+        volta vazio, e a partir dai a busca dele e pulada."""
+        if self._tem_filho_telefone is None:
+            self._tem_filho_telefone = self._cell_phone(cell) is not None
+            log.info("numero dentro da celula: %s",
+                     "sim" if self._tem_filho_telefone else "nao (usando o rotulo)")
+        return self._tem_filho_telefone
+
+    def _rotulo_repetido(self, cell) -> bool:
+        """O rotulo desta celula e o mesmo da ultima aceita por single-cell-trust?
+
+        Neste iPhone o rotulo e "Nome, recado" e nao contem o numero, entao todo
+        contato entra por single-cell-trust: se a lista ainda nao tiver
+        refiltrado, tocariamos de novo na celula do contato ANTERIOR — o que a
+        desmarca e perde dois contatos em silencio, ja que com --trust-profile
+        nao ha verificacao de selecao. Custo: 0 chamadas (o rotulo ja foi lido).
+
+        Limite conhecido, a medir no aparelho: se tocar na linha mudar o rotulo
+        da celula (o iOS agrega os rotulos dos filhos, e pode entrar um
+        "Selecionado"), os hashes nunca coincidem e esta guarda nao dispara.
+        Nesse caso o criterio direto seria ler o atributo `selected` da celula
+        unica em todo contato (+0,05 s por contato)."""
         rotulo = self._cell_text(cell)
         if not rotulo or self._rotulo_anterior_h is None:
             return False
-        if _texto_hash(rotulo) != self._rotulo_anterior_h:
-            return False
-        self.colisoes += 1
-        self.settle(1.5)                      # deixa a lista refiltrar
-        cells = self._find_cells_escalating()
-        if len(cells) != 1:
-            return True                       # mudou: esta busca sera refeita
-        novo = self._cell_text(cells[0])
-        if _texto_hash(novo) != self._rotulo_anterior_h:
-            return True                       # a tela mudou; refazer
+        return _texto_hash(rotulo) == self._rotulo_anterior_h
+
+    def _parece_marcada(self, cell) -> bool:
         try:
-            marcada = cells[0].get_attribute("selected") in ("true", True, "1")
+            return cell.get_attribute("selected") in ("true", True, "1")
         except WebDriverException:
-            marcada = False
-        if marcada:
-            log.warning("celula identica a anterior e ja marcada: nao toco de novo "
-                        "(a lista provavelmente nao refiltrou a tempo)")
-            return True
-        log.warning("celula com o mesmo rotulo do contato anterior, sem marca de "
-                    "selecao: tratando como contato distinto (homonimo)")
-        return False
+            return False
 
     def _is_invite_cell(self, cell) -> bool:
         """Retorna True se a celula e 'Convidar para WhatsApp' (nao e contato
@@ -696,8 +758,16 @@ class IosSpike:
             return
 
         if cell is None:
-            self.results.append({"label": label, "outcome": "not_found"})
-            log.info("caso %s: NAO encontrado (%s)", label, mask(query))
+            r = {"label": label, "outcome": "not_found"}
+            if self._motivo:
+                # Sem isto a colisao de rotulo saía como um "nao encontrado"
+                # qualquer — e a sessao deixa os nao encontrados de fora da
+                # rodada seguinte, entao o contato se perderia sem explicacao.
+                r["detail"] = self._motivo
+                log.info("caso %s: NAO incluido — %s", label, self._motivo)
+            else:
+                log.info("caso %s: NAO encontrado (%s)", label, mask(query))
+            self.results.append(r)
             return
 
         # Cada numero e pesquisado uma vez (o CSV ja vem deduplicado): sem

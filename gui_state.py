@@ -613,10 +613,23 @@ def preset_de(speed: float, pace: float, pace_lists: float) -> str:
     return "Personalizado"
 
 
+# Ida-e-volta ao aparelho por contato selecionado, medido no log do Appium
+# (2026-09-04/2026-09-10, iPhone da operacao): limpar 0,42 + digitar 0,68 +
+# achar as celulas 0,25 + ler o rotulo 0,05 + tocar 0,45, mais ~0,13 s de
+# overhead de rede. Nao depende do ritmo escolhido — so as pausas dependem.
+SEGUNDOS_DE_CHAMADAS = 1.98
+SEGUNDOS_POR_LISTA = 17.0      # abrir a nova transmissao e criar, uma vez por lista
+
+
 def estimativa_minutos(pace: float, speed: float) -> int:
     """Minutos aproximados para uma lista cheia (256 contatos), no modo arquivo.
 
-    Formula herdada do run_ios.py --dry-run; e estimativa, nao medicao.
+    Conta as chamadas MEDIDAS mais as pausas calculadas do codigo (settle()
+    escala por speed e tem piso). Continua sendo estimativa: o aparelho, o cabo
+    e o WhatsApp mandam. A formula anterior so somava pausas e dava ~8 min
+    quando a medicao dizia 16.
     """
-    por_contato = max(2 * 1.5 * speed, 0.5) + 0.5 + pace
-    return max(1, round(LIMITE_LISTA * por_contato / 60))
+    apos_digitar = max(1.5 * speed, 0.375)      # settle() em find_exact_cell
+    apos_tocar = max(0.5 * speed, 0.25)         # settle(0.5) apos o clique
+    por_contato = SEGUNDOS_DE_CHAMADAS + apos_digitar + apos_tocar + pace
+    return max(1, round((SEGUNDOS_POR_LISTA + LIMITE_LISTA * por_contato) / 60))

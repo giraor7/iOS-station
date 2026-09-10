@@ -164,8 +164,8 @@ automação de interface. O que existe é cortar chamadas desperdiçadas:
 | Modo | Chamadas ao iPhone | Estimativa por lista de 256 |
 |---|---|---|
 | Arquivo (CSV/VCF) até a V15 | ~28 por contato | 15 a 20 min |
-| Arquivo (CSV/VCF) agora | ~6 por contato + 0,85 s de pausas (Turbo) | 5,5 a 7 min |
-| Arquivo (CSV/VCF), preset Máximo | ~9 por contato + 0,6 s de pausas | 5 a 7 min |
+| Arquivo (CSV/VCF) agora | 5 por contato + 0,95 s de pausas (Turbo) | **~13 min (medido: 3,8 s/contato antes das últimas 3 consultas saírem)** |
+| Arquivo (CSV/VCF), preset Máximo | 5 por contato + 0,675 s de pausas | ~12 min (mede antes: pausa curta gera "não encontrado" falso) |
 | Scroll Livre até a V14 | ~44 por tela | ~4 min |
 | Scroll Livre agora (padrão) | ~13 por tela | ~1,5 min |
 | Scroll Livre com `--turbo` | ~5 por tela | ~1 min |

@@ -275,6 +275,12 @@ def main() -> int:
             amb = sum(1 for r in resultados if r["outcome"] == "ambiguous")
             log.info("%s: %d selecionados, %d nao encontrados, %d ambiguos; criada=%s",
                      label, sel, nf, amb, concluida)
+            if getattr(spike, "colisoes", 0):
+                # Quantas vezes a tela ainda mostrava o contato anterior. E a
+                # medicao que diz se a pausa apos digitar esta curta demais.
+                log.info("%s: %d vez(es) a lista ainda nao tinha refiltrado "
+                         "(se for recorrente, use um ritmo mais lento)",
+                         label, spike.colisoes)
             if concluida:
                 criadas += 1
             pace_sleep(args.pace_lists, i)

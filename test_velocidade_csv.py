@@ -153,19 +153,40 @@ class CamadaLembrada(unittest.TestCase):
 
 class TelefoneNaCelulaUnica(unittest.TestCase):
 
-    def test_uma_celula_nao_busca_o_filho_do_telefone(self):
-        sp, d = spike([Cel("Ana")])
+    def test_aprende_uma_vez_que_nao_ha_telefone_e_para_de_perguntar(self):
+        """O 1o contato da lista ainda pergunta; os seguintes nao."""
+        primeiro, segundo = Cel("Ana"), Cel("Bruno")
+        sp, d = spike([primeiro])
         d.profundidade = 14
         cel = sp.find_exact_cell("+5521999990001", None)
-        self.assertIs(cel, d.cels[0])
+        self.assertIs(cel, primeiro)
         self.assertTrue(getattr(cel, "_sct", False))
-        self.assertNotIn(f"find:{PHONE_ID}", cel.atributos_lidos)
+        self.assertIn(f"find:{PHONE_ID}", primeiro.atributos_lidos)
+        self.assertIs(sp._tem_filho_telefone, False)
+        d.cels = [segundo]
+        self.assertIs(sp.find_exact_cell("+5521999990002", None), segundo)
+        self.assertNotIn(f"find:{PHONE_ID}", segundo.atributos_lidos)
 
-    def test_a_escolha_e_a_mesma_com_telefone_que_casa(self):
-        """Num aparelho onde o filho existe e casa, a celula escolhida e a mesma."""
-        sp, d = spike([Cel("Ana", fone="+55 21 99999-0001")])
+    def test_picker_novo_volta_a_perguntar(self):
+        sp, d = spike([Cel("Ana")])
         d.profundidade = 14
-        self.assertIs(sp.find_exact_cell("+5521999990001", None), d.cels[0])
+        sp.find_exact_cell("+5521999990001", None)
+        sp.wait_for = lambda k, timeout=0, required=True: None
+        try:
+            sp.open_new_broadcast()
+        except Exception:
+            pass
+        self.assertIsNone(sp._tem_filho_telefone)
+
+    def test_onde_o_telefone_existe_ele_continua_decidindo(self):
+        """Aparelho com o filho de telefone: o atalho nao liga e o match por
+        numero (a conferencia dura) continua valendo mesmo com 1 celula."""
+        cel = Cel("Ana", fone="+55 21 99999-0001")
+        sp, d = spike([cel])
+        d.profundidade = 14
+        self.assertIs(sp.find_exact_cell("+5521999990001", None), cel)
+        self.assertIs(sp._tem_filho_telefone, True)
+        self.assertFalse(getattr(cel, "_sct", False))   # match exato, nao confianca
 
     def test_duas_celulas_continuam_usando_o_telefone(self):
         cels = [Cel("Ana", fone="+55 21 99999-0001"), Cel("Ana", fone="+55 21 99999-0002")]
@@ -224,6 +245,8 @@ class DoisToquesNaMesmaCelula(unittest.TestCase):
         self.assertTrue(cel.marcada)                        # o anterior continua
         self.assertEqual([r["outcome"] for r in sp.results], ["selected", "not_found"])
         self.assertEqual(sp.colisoes, 1)
+        # sem o motivo, a sessao deixaria o contato de fora sem explicacao
+        self.assertIn("ja marcada", sp.results[1]["detail"])
 
     def test_homonimo_nao_marcado_e_aceito(self):
         """Mesmo rotulo, mas a celula nao esta marcada: e outro contato."""
@@ -258,19 +281,75 @@ class DoisToquesNaMesmaCelula(unittest.TestCase):
 
 
 class ChaveDaDigitacao(unittest.TestCase):
+    """Isola o ambiente: outro modulo de teste pode ter deixado LL_RAPIDO ligado."""
+
+    def setUp(self):
+        self._antes = {k: os.environ.pop(k, None)
+                       for k in ("LL_DIGITACAO", "LL_RAPIDO", "LL_ATTRS")}
+
+    def tearDown(self):
+        for k, v in self._antes.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     def test_usa_a_chave_que_existe_no_driver(self):
         os.environ["LL_DIGITACAO"] = "120"
-        try:
-            ajustes = spike_ios._ajustes_experimentais()
-        finally:
-            os.environ.pop("LL_DIGITACAO")
+        ajustes = spike_ios._ajustes_experimentais()
         self.assertEqual(ajustes.get("maxTypingFrequency"), 120)
         self.assertNotIn("typingFrequency", ajustes)
 
     def test_desligado_por_padrao(self):
-        os.environ.pop("LL_DIGITACAO", None)
         self.assertEqual(spike_ios._ajustes_experimentais(), {})
+
+
+class DigitacaoConferida(unittest.TestCase):
+    """Digitacao acelerada pode perder caractere; a busca vira um PREFIXO do
+    numero e, se sobrar uma celula, ela seria aceita — podendo ser outro
+    contato. So confere quando LL_DIGITACAO esta ligado."""
+
+    class Campo:
+        def __init__(self, valor):
+            self.valor = valor
+            self.lido = 0
+
+        def get_attribute(self, a):
+            self.lido += 1
+            return self.valor if a == "value" else None
+
+    def _spike(self, valor, ligado):
+        antes = os.environ.pop("LL_DIGITACAO", None)
+        if ligado:
+            os.environ["LL_DIGITACAO"] = "120"
+        try:
+            sp, d = spike([Cel("Ana")])
+        finally:
+            os.environ.pop("LL_DIGITACAO", None)
+            if antes is not None:
+                os.environ["LL_DIGITACAO"] = antes
+        campo = self.Campo(valor)
+        sp._search_box = campo
+        return sp, d, campo
+
+    def test_numero_incompleto_nao_seleciona_ninguem(self):
+        sp, d, campo = self._spike("+552199999000", ligado=True)   # 1 digito a menos
+        d.profundidade = 14
+        self.assertIsNone(sp.find_exact_cell("+5521999990001", None))
+        self.assertIn("nao conferiu", sp._motivo)
+        self.assertEqual(d.cels[0].cliques, 0)
+
+    def test_numero_completo_segue_normalmente(self):
+        sp, d, campo = self._spike("+55 21 99999-0001", ligado=True)
+        d.profundidade = 14
+        self.assertIs(sp.find_exact_cell("+5521999990001", None), d.cels[0])
+        self.assertEqual(campo.lido, 1)
+
+    def test_desligado_nao_le_o_campo(self):
+        sp, d, campo = self._spike("qualquer coisa", ligado=False)
+        d.profundidade = 14
+        self.assertIs(sp.find_exact_cell("+5521999990001", None), d.cels[0])
+        self.assertEqual(campo.lido, 0)
 
 
 if __name__ == "__main__":

@@ -411,5 +411,27 @@ class Sessao(unittest.TestCase):
         self.assertIn("listas criadas", itens["fonte"].detalhe)
 
 
+class Estimativa(unittest.TestCase):
+    """A tela dizia 8 min quando o aparelho levava 16. A formula agora parte das
+    chamadas medidas, nao so das pausas."""
+
+    def test_turbo_bate_com_a_medicao(self):
+        speed, pace, _ = st.PRESETS_RITMO["Turbo"]
+        self.assertEqual(st.estimativa_minutos(pace, speed), 13)
+
+    def test_mais_devagar_nunca_estima_menos(self):
+        anterior = 0
+        for nome in ("Máximo", "Turbo", "Rápido", "Seguro"):
+            speed, pace, _ = st.PRESETS_RITMO[nome]
+            atual = st.estimativa_minutos(pace, speed)
+            self.assertGreaterEqual(atual, anterior, nome)
+            anterior = atual
+
+    def test_o_piso_das_pausas_limita_o_ganho(self):
+        """Abaixo do piso do runner, baixar o ritmo nao muda mais nada."""
+        self.assertEqual(st.estimativa_minutos(0.05, 0.25),
+                         st.estimativa_minutos(0.05, 0.1))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
