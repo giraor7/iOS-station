@@ -78,6 +78,9 @@ class Modelo:
         self.altura_custom: dict = {}       # indice -> altura diferente da linha padrao
         self.rect_ilegivel: set = set()     # indices cujo .rect levanta excecao (stale)
         self.chamadas_app_front = 0
+        # ---- auditoria 2026-09-10 (5a rodada) ----
+        self.tem_cancelar = True            # o 'Cancelar' do seletor existe na tela
+        self.cancelamentos = 0              # quantas vezes ele foi clicado
 
     def tocar_em(self, x, y):
         """Toque por coordenada (rajada turbo). Se um dialogo estiver na frente,
@@ -183,6 +186,24 @@ class BotaoCriar:
         pass
 
 
+class BotaoCancelar:
+    """Stand-in do 'Cancelar' do seletor. Existe desde 2026-09-10 (5a rodada):
+    sem ele o FakeDriver nunca achava o botao, cancelar_seletor() so logava
+    "nao achei o 'Cancelar'" e NENHUM teste conseguia distinguir "a estacao
+    tentou fechar o seletor" de "a estacao foi embora deixando o seletor
+    aberto e marcado no iPhone"."""
+
+    def __init__(self, m: Modelo):
+        self.m = m
+
+    def get_attribute(self, a):
+        return "true" if a == "enabled" else None
+
+    def click(self):
+        self.m.cancelamentos += 1
+        self.m.picker_aberto = False
+
+
 class FakeDriver:
     def __init__(self, m: Modelo):
         self.m = m
@@ -248,6 +269,8 @@ class FakeDriver:
             return self.m.visiveis()
         if val == "ParticipantPickerNavigationBar_RightBarButton":
             return [BotaoCriar(self.m)] if self._ancora_visivel() else []
+        if self.m.tem_cancelar and "Cancelar" in str(val):
+            return [BotaoCancelar(self.m)] if self.m.picker_aberto else []
         if "XCUIElementTypeTextView" in str(val) and self.m.composer:
             return [object()]
         return []
@@ -256,6 +279,8 @@ class FakeDriver:
         self._consulta()
         if val == "ParticipantPickerNavigationBar_RightBarButton" and self._ancora_visivel():
             return BotaoCriar(self.m)
+        if self.m.tem_cancelar and "Cancelar" in str(val) and self.m.picker_aberto:
+            return BotaoCancelar(self.m)
         raise NoSuchElementException(val)
 
     def quit(self):
@@ -2418,6 +2443,416 @@ class WdaMortoNaoSaiComoRegraDaEstacao(unittest.TestCase):
         finally:
             rs.ScrollLivre.selecionar = orig_sel
         self.assertEqual(codigo, 7)
+
+
+# ---------------------------------------------------------------------------
+# auditoria 2026-09-10 (5a rodada): o diff da guarda de duplicata / orcamento
+# de relogio / celula sem rotulo nunca tinha sido atacado. Cada classe abaixo
+# fica VERMELHA se a correcao correspondente for revertida.
+# ---------------------------------------------------------------------------
+
+class DiscriminadorDeAlturaNaoPulaContato(unittest.TestCase):
+    """O criterio de altura era SIMETRICO (`abs(h - h_modal) <= 2.0`): uma
+    linha de CONTATO ilegivel 3 pt mais alta que a moda virava "cabecalho de
+    secao", nao setava corte, e a lista passava por cima da pessoa — que
+    ficava atras do ponto de retomada para sempre. A altura de uma linha de
+    contato varia de verdade (recado em duas linhas, sem recado, Dynamic
+    Type); a de um cabecalho e MUITO menor. O criterio agora e assimetrico."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def _rodar(self, altura):
+        m = Modelo(nomes_ordenados(60))
+        m.sem_rotulo = {7}
+        m.altura_custom = {7: altura}
+        codigo = rodar_main(m, ["--trust-profile", "--approve-create",
+                                "--limite-por-lista", "20", "--max-listas", "1"],
+                            self.path)
+        return m, codigo
+
+    def test_celula_mais_alta_que_a_moda_para_a_lista(self):
+        m, codigo = self._rodar(67)      # 3 pt acima da moda (64)
+        self.assertEqual(codigo, 6)
+        self.assertEqual(sorted(m.selecionados), list(range(7)),
+                         "a lista ultrapassou uma celula ilegivel MAIS ALTA que a moda")
+
+    def test_celula_bem_mais_alta_tambem_para(self):
+        m, codigo = self._rodar(90)
+        self.assertEqual(codigo, 6)
+        self.assertEqual(sorted(m.selecionados), list(range(7)))
+
+    def test_celula_um_pouco_mais_baixa_tambem_para(self):
+        # 56 pt: menor que a moda, mas longe de um cabecalho (28 pt). Ambigua
+        # => para, que e o lado que nao perde ninguem.
+        m, codigo = self._rodar(56)
+        self.assertEqual(codigo, 6)
+        self.assertEqual(sorted(m.selecionados), list(range(7)))
+
+    def test_cabecalho_de_secao_continua_sendo_ignorado(self):
+        m, codigo = self._rodar(Modelo.ALT_CABECALHO)
+        self.assertEqual(codigo, 0)
+        self.assertIn(8, m.selecionados,
+                      "um cabecalho de secao passou a parar a lista")
+
+    def test_eh_decoracao_trava_os_dois_lados(self):
+        self.assertTrue(rs.eh_decoracao(28, 64))          # cabecalho
+        self.assertFalse(rs.eh_decoracao(64, 64))         # a propria moda
+        self.assertFalse(rs.eh_decoracao(67, 64))         # mais alta: contato
+        self.assertFalse(rs.eh_decoracao(56, 64))         # ambigua: contato
+        self.assertFalse(rs.eh_decoracao(64, None))       # sem moda: contato
+
+
+class CorteAtrasDaRetomadaNaoTravaARodada(unittest.TestCase):
+    """O corte por celula ilegivel era calculado sobre a tela INTEIRA — e a
+    parte de cima da tela, na retomada, e gente que JA ESTA em lista criada.
+    A primeira celula boa devolvida por _retomar caia depois do corte, a lista
+    parava com 0 confirmados (codigo 7, progresso intacto) e a rodada seguinte
+    fazia exatamente o mesmo: livelock, com o log afirmando que a celula era
+    "a proxima da fila"."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+        self.args = ["--trust-profile", "--approve-create",
+                     "--limite-por-lista", "10", "--max-listas", "1"]
+
+    def test_celula_ilegivel_antes_da_ancora_nao_bloqueia_a_lista_seguinte(self):
+        m = Modelo(nomes_ordenados(60))
+        self.assertEqual(rodar_main(m, self.args, self.path), 0)
+        # o seletor e reaberto do zero na rodada seguinte (outra renderizacao)
+        m.offset, m.selecionados = 0.0, set()
+        m.sem_rotulo = {5}          # celula JA INCLUIDA na lista 1 fica ilegivel
+        codigo = rodar_main(m, self.args, self.path)
+        prog = rs.Progresso(self.path)
+        self.assertEqual(codigo, 0,
+                         "a celula ilegivel de uma lista ANTERIOR travou a rodada")
+        self.assertEqual(prog.listas_criadas, 2)
+        self.assertEqual(prog.offset, 20)
+        self.assertEqual(sorted(m.selecionados), list(range(10, 20)))
+
+    def test_celula_ilegivel_DEPOIS_da_ancora_continua_parando(self):
+        """A trava nao pode ser relaxada para quem esta a FRENTE da retomada."""
+        m = Modelo(nomes_ordenados(60))
+        self.assertEqual(rodar_main(m, self.args, self.path), 0)
+        m.offset, m.selecionados = 0.0, set()
+        m.sem_rotulo = {13}         # contato NOVO, ainda fora de qualquer lista
+        rodar_main(m, self.args, self.path)
+        self.assertEqual(sorted(m.selecionados), list(range(10, 13)),
+                         "a lista ultrapassou uma celula ilegivel a FRENTE da retomada")
+
+
+class BloqueioDaGuardaNaUltimaPassada(unittest.TestCase):
+    """Na ULTIMA PASSADA (margem=0, borda inferior da agenda) a guarda
+    bloqueava a celula e so somava o contador: nada era gravado em
+    `bloqueados_apos_retomada`. Um homonimo cross-lista na ultima linha da
+    agenda — o unico ponto que a leitura com margem nunca enxerga — sumia sem
+    rastro, e o unico texto que saia era o tranquilizador "ninguem foi
+    duplicado"."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def test_homonimo_so_visivel_sem_margem_fica_registrado(self):
+        nomes = nomes_ordenados(10)
+        m, sp = novo(nomes, limite=256)
+        prog = rs.Progresso(self.path)
+        prog.offset, prog.listas_criadas = 1, 1
+        prog.ultimo_rotulo, prog.ultimo_hash = nomes[0], rs.hash_nome(nomes[0])
+        # OUTRA pessoa com o mesmo nome do ultimo contato da agenda ja entrou
+        # numa lista anterior. Com a faixa de chips (y=776) o indice 9 so
+        # aparece na passada sem margem.
+        alvo = rs.hash_nome(nomes[9])
+        prog.usados = {alvo}
+        qtd = sp.selecionar(prog)
+        self.assertEqual(qtd, 8)
+        self.assertNotIn(9, m.selecionados)
+        self.assertEqual(sp.stats["bloqueados_guarda"], 1)
+        self.assertIn(alvo, sp.bloqueados_apos_retomada,
+                      "a guarda bloqueou na ultima passada e nao deixou rastro")
+
+
+class BloqueioDaGuardaNaListaDeRecuperacao(unittest.TestCase):
+    """Na lista de recuperacao (--recomecar-do-A) o registro era SUPRIMIDO
+    (`if not self.em_recuperacao`) e o log chamava a perda permanente de
+    "exatamente o trabalho dela", em nivel INFO. Dois homonimos ADJACENTES sao
+    o caso normal de uma agenda ordenada."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def test_homonimo_da_recuperacao_fica_registrado_e_o_log_nao_afirma_certeza(self):
+        nomes = nomes_ordenados(12)
+        nomes[5] = nomes[4]          # duas pessoas DIFERENTES, mesmo nome
+        criar = ["--trust-profile", "--approve-create",
+                 "--limite-por-lista", "5", "--max-listas", "1"]
+        self.assertEqual(rodar_main(Modelo(list(nomes)), criar, self.path), 0)
+        self.assertEqual(rodar_main(Modelo(list(nomes)), ["--recomecar-do-A"], self.path), 0)
+        with CapturaLog() as cap:
+            rodar_main(Modelo(list(nomes)), criar, self.path)
+        prog = rs.Progresso(self.path)
+        self.assertIn(rs.hash_nome(nomes[4]),
+                      prog.historico[-1].get("bloqueados_apos_retomada") or [],
+                      "a lista de recuperacao nao registrou o bloqueio da guarda")
+        self.assertIn("bloqueados_apos_retomada_aviso", prog.historico[-1])
+        self.assertNotIn("era exatamente o trabalho dela", cap.texto,
+                         "o log afirma certeza de que nada foi perdido")
+        self.assertIn("homonimo", cap.texto)
+
+
+class AvisoDeGuardaCegaNaoDependeDaVersaoDoArquivo(unittest.TestCase):
+    """O aviso estava preso a `self.versao == 1`. Bastava UMA lista nova para
+    salvar() regravar o arquivo como versao 2 e o unico aviso sobre guarda
+    cega sumir para sempre, enquanto o resumo passava a dizer so "a guarda
+    conhece N contato(s) ja usados" — uma frase que afirma protecao."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+        hist = [{"lista": i + 1, "quantidade": 5} for i in range(20)]
+        hist.append({"lista": 21, "quantidade": 5,
+                     "hashes": [rs.hash_nome(f"Contato {k:04d}") for k in range(100, 105)]})
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({"versao": 2, "offset": 105, "listas_criadas": 21,
+                       "ultimo_rotulo": "Contato 0104",
+                       "ultimo_hash": rs.hash_nome("Contato 0104"),
+                       "historico": hist}, f)
+
+    def test_arquivo_ja_migrado_com_listas_sem_digital_ainda_avisa(self):
+        with CapturaLog() as cap:
+            prog = rs.Progresso(self.path)
+        self.assertEqual(prog.versao, 2)
+        self.assertEqual(prog.guarda_incompleta(), 20)
+        self.assertIn("nao sabe QUEM entrou em 20 de 21", cap.texto)
+
+    def test_resumo_cita_a_cobertura_parcial(self):
+        resumo = rs.Progresso(self.path).resumo()
+        self.assertIn("a guarda cobre 1 de 21 lista(s)", resumo)
+        self.assertIn("nao gravaram impressao digital", resumo)
+
+
+class ParadaSemListaFechaOSeletor(unittest.TestCase):
+    """Numa rodada de VERDADE (--approve-create) que para com menos de 2
+    confirmados, o codigo saia com 7 sem tentar fechar o seletor: o iPhone
+    ficava com o seletor ABERTO e contatos marcados, e a GUI dizia so "nada
+    foi perdido". As duas paradas novas do diff (orcamento de relogio e celula
+    sem rotulo) chegam a esse mesmo ramo."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def test_rodada_real_com_menos_de_dois_confirmados_cancela_o_seletor(self):
+        m = Modelo(nomes_ordenados(60))
+        m.falhar_clique_sempre = {1}      # "element is not hittable"
+        codigo = rodar_main(m, ["--trust-profile", "--approve-create",
+                                "--limite-por-lista", "20", "--max-listas", "1"],
+                            self.path)
+        self.assertEqual(codigo, 7)
+        self.assertEqual(sorted(m.selecionados), [0])
+        self.assertEqual(m.cancelamentos, 1,
+                         "a estacao saiu sem tentar fechar o seletor")
+        self.assertFalse(m.picker_aberto,
+                         "o seletor ficou aberto e marcado no iPhone")
+
+    def test_o_texto_do_codigo_7_manda_conferir_o_seletor(self):
+        import gui_state
+        texto = gui_state.desfecho_para(7).orientacao
+        self.assertIn("seletor no iPhone", texto)
+        self.assertNotIn("Nada foi perdido", texto)
+
+
+class CorteSemRectNoPrimeiroElemento(unittest.TestCase):
+    """Irmao esquecido de CelulaIlegivelNaoEUltrapassada: quando o elemento
+    OBSOLETO e o PRIMEIRO da resposta bruta, `ultimo_y_ok` ainda e None e o
+    corte nasce em 0.0. Esse ramo nao era executado por nenhum teste — e
+    reverte-lo para "descartar em silencio" deixava a suite inteira verde
+    enquanto o contato do topo sumia de qualquer lista."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def test_primeiro_elemento_sem_rect_para_a_lista(self):
+        m = Modelo(nomes_ordenados(60))
+        m.attrs_na_resposta = False       # caminho antigo (usa _rects)
+        m.cabecalhos = {2}                # quebra a inferencia de posicao
+        m.rect_ilegivel = {0}             # o PRIMEIRO elemento e o obsoleto
+        codigo = rodar_main(m, ["--trust-profile", "--approve-create",
+                                "--limite-por-lista", "20", "--max-listas", "1"],
+                            self.path)
+        prog = rs.Progresso(self.path)
+        self.assertEqual(codigo, 7)
+        self.assertEqual(sorted(m.selecionados), [],
+                         "a lista ultrapassou o contato do topo")
+        self.assertEqual(prog.listas_criadas, 0)
+        self.assertEqual(prog.offset, 0)
+
+
+class CorteNaUltimaPassadaDaAgenda(unittest.TestCase):
+    """A checagem de corte que vive DENTRO da ultima passada (borda inferior
+    da agenda, `sem_avanco >= CICLOS_SEM_AVANCO`) nao era executada por
+    nenhum teste: apagar o bloco inteiro deixava tudo verde e a estacao
+    voltava a tocar nos contatos DEPOIS da celula ilegivel."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+        self.args = ["--trust-profile", "--approve-create",
+                     "--limite-por-lista", "256", "--max-listas", "1"]
+
+    def test_agenda_que_acaba_nao_ultrapassa_a_celula_ilegivel(self):
+        m = Modelo(nomes_ordenados(12))
+        m.sem_rotulo = {10}
+        codigo = rodar_main(m, self.args, self.path)
+        prog = rs.Progresso(self.path)
+        self.assertEqual(codigo, 6)
+        self.assertEqual(sorted(m.selecionados), list(range(10)),
+                         "a lista ultrapassou a celula ilegivel na ultima passada")
+        self.assertEqual(prog.offset, 10)
+        self.assertIn("sem rotulo", prog.historico[-1]["motivo_da_parada"])
+
+    def test_pular_celula_ilegivel_continua_valendo_na_ultima_passada(self):
+        m = Modelo(nomes_ordenados(12))
+        m.sem_rotulo = {10}
+        codigo = rodar_main(m, self.args + ["--pular-celula-ilegivel"], self.path)
+        prog = rs.Progresso(self.path)
+        self.assertEqual(codigo, 0)
+        self.assertIn(11, m.selecionados,
+                      "o escape do operador nao chegou na ultima passada")
+        self.assertTrue(prog.historico[-1]["celulas_sem_rotulo_puladas"])
+
+
+class DuasCelulasIlegiveisNaMesmaTela(unittest.TestCase):
+    """A escolha do corte usa `min` (a PRIMEIRA celula ilegivel da tela).
+    Trocar por `max` deixava a suite verde e fazia a lista tocar em tudo o que
+    estivesse ENTRE as duas — com o ponto de retomada passando por cima da
+    primeira."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def test_a_lista_para_na_primeira(self):
+        m = Modelo(nomes_ordenados(60))
+        m.sem_rotulo = {4, 7}
+        codigo = rodar_main(m, ["--trust-profile", "--approve-create",
+                                "--limite-por-lista", "20", "--max-listas", "1"],
+                            self.path)
+        self.assertEqual(codigo, 6)
+        self.assertEqual(sorted(m.selecionados), list(range(4)),
+                         "a lista tocou entre as duas celulas ilegiveis")
+
+
+class AvisoDePuladosEUmLimiteSuperior(unittest.TestCase):
+    """`celulas_sem_rotulo_puladas` conta OBSERVACOES de celula ilegivel, nao
+    pessoas: a sobreposicao de 3 celulas entre telas reobserva a mesma celula.
+    O progresso afirmava "N pessoa(s) nao entraram em lista nenhuma" — um
+    numero que o codigo nao sustenta (podem ser menos, inclusive zero, quando
+    a celula ja esta numa lista anterior)."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def test_o_aviso_nao_afirma_um_numero_exato_de_pessoas(self):
+        m = Modelo(nomes_ordenados(60))
+        m.sem_rotulo = {7}            # UMA celula ilegivel de verdade
+        codigo = rodar_main(m, ["--trust-profile", "--approve-create",
+                                "--pular-celula-ilegivel",
+                                "--limite-por-lista", "20", "--max-listas", "1"],
+                            self.path)
+        self.assertEqual(codigo, 0)
+        ent = rs.Progresso(self.path).historico[-1]
+        self.assertTrue(ent["aviso"].startswith("ate "), ent["aviso"])
+        self.assertIn("Pode ser menos", ent["aviso"])
+        self.assertGreaterEqual(len(ent["celulas_sem_rotulo_puladas"]), 1)
+
+
+class AvisosDoHistoricoNaListaPARCIAL(unittest.TestCase):
+    """O bloco que grava homonimos / bloqueados / pulados existia DUPLICADO, e
+    so o ramo de lista COMPLETA tinha teste: apagar o do ramo PARCIAL deixava
+    tudo verde e o unico rastro de uma perda permanente sumia do progresso."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def test_lista_parcial_grava_os_mesmos_avisos(self):
+        nomes = nomes_ordenados(60)
+        nomes[25] = nomes[3]          # homonimo cross-lista
+        criar = ["--trust-profile", "--approve-create",
+                 "--limite-por-lista", "20", "--max-listas", "1"]
+        self.assertEqual(rodar_main(Modelo(list(nomes)), criar, self.path), 0)
+        m2 = Modelo(list(nomes))
+        m2.sem_rotulo = {33}          # a lista 2 termina PARCIAL
+        codigo = rodar_main(m2, criar, self.path)
+        ent = rs.Progresso(self.path).historico[-1]
+        self.assertEqual(codigo, 6)
+        self.assertTrue(ent["parcial"])
+        self.assertIn(rs.hash_nome(nomes[3]), ent.get("bloqueados_apos_retomada") or [])
+        self.assertIn("bloqueados_apos_retomada_aviso", ent)
+
+
+class OrcamentoDeRelogioNaRetomadaNaoMandaRepetir(unittest.TestCase):
+    """O orcamento estourando DURANTE a retomada produz uma rodada
+    estritamente inutil e repetivel (nada tocado, progresso intacto). A
+    mensagem mandava "aumente --max-minutos ou RODE DE NOVO" — e rodar de novo
+    e exatamente o que nao resolve. Alem disso ela nem chegava ao log, porque
+    main() descarta o texto da excecao quando `sp.parada` ja esta setado."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def test_a_mensagem_diz_que_repetir_nao_resolve(self):
+        nomes = nomes_ordenados(600)
+        prog = progresso_apos(nomes, 399, self.path)
+        prog.usados = {rs.hash_nome(n) for n in nomes[:400]}
+        prog.historico = [{"lista": 1, "quantidade": 400, "hashes": sorted(prog.usados)}]
+        prog.salvar()
+        m = Modelo(nomes)
+        m.custo_consulta = 20.0        # aparelho lento (o log real tem 33,6s)
+        with com_relogio(m):
+            with CapturaLog() as cap:
+                codigo = rodar_main(m, ["--trust-profile", "--approve-create",
+                                        "--limite-por-lista", "10", "--max-listas", "1",
+                                        "--max-minutos", "1"], self.path)
+        prog2 = rs.Progresso(self.path)
+        self.assertEqual(codigo, 7)
+        self.assertEqual(sorted(m.selecionados), [])
+        self.assertEqual(prog2.offset, 400, "o progresso avancou sem ninguem ser tocado")
+        self.assertIn("RODAR DE NOVO NAO RESOLVE", cap.texto)
+        self.assertNotIn("ou rode de novo", cap.texto)
+
+
+class OrcamentoEstouradoSemNenhumToque(unittest.TestCase):
+    """O ramo `else` do estouro do orcamento (nenhum toque confirmado) nao era
+    executado por teste nenhum. Ele e o unico lugar que diz ao operador que o
+    progresso NAO avancou e que a rodada seguinte fara o mesmo."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "p.json")
+
+    def test_lista_do_A_que_estoura_antes_do_primeiro_toque(self):
+        nomes = nomes_ordenados(400)
+        m = Modelo(nomes)
+        m.custo_consulta = 6.0
+        # filtro de DDD que so libera o fim da agenda: a rodada rola muito e
+        # nao toca em ninguem.
+        permitidos = {rs.hash_nome(n) for n in nomes[350:]}
+        orig = rs.permitidos_por_ddd
+        rs.permitidos_por_ddd = lambda *a, **k: {
+            "permitidos": permitidos, "nomes": len(nomes),
+            "ambiguos": set(), "sem_numero": 0}
+        try:
+            with com_relogio(m):
+                with CapturaLog() as cap:
+                    codigo = rodar_main(m, ["--trust-profile", "--approve-create",
+                                            "--ddd", "21", "--agenda", "x.csv",
+                                            "--limite-por-lista", "256",
+                                            "--max-listas", "1",
+                                            "--max-minutos", "2"], self.path)
+        finally:
+            rs.permitidos_por_ddd = orig
+        prog = rs.Progresso(self.path)
+        self.assertEqual(codigo, 7)
+        self.assertEqual(sorted(m.selecionados), [])
+        self.assertEqual(prog.offset, 0)
+        self.assertEqual(prog.listas_criadas, 0)
+        self.assertIn("SEM tocar em ninguem", cap.texto)
+        self.assertIn("progresso NAO", cap.texto)
 
 
 if __name__ == "__main__":

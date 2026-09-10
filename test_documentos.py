@@ -113,7 +113,8 @@ class TestNumerosQueOsDocumentosPrometem(unittest.TestCase):
     """README/MODO-SCROLL-LIVRE/DEVICE-TEST-IOS/SETUP-MAC precisam citar o
     numero que o CODIGO hoje sustenta, nunca o aposentado."""
 
-    DOCS = ("README.md", "MODO-SCROLL-LIVRE.md", "DEVICE-TEST-IOS.md", "SETUP-MAC.md")
+    DOCS = ("README.md", "COMO-OPERAR.md", "MODO-SCROLL-LIVRE.md",
+            "DEVICE-TEST-IOS.md", "SETUP-MAC.md")
 
     def test_numero_aposentado_nao_aparece_em_nenhum_doc(self):
         for nome in self.DOCS:
@@ -351,6 +352,280 @@ class TestGuiaCitaAsSaidasQueOCodigoProduz(unittest.TestCase):
                               # cobertos por texto proprio, sem numero de codigo
             self.assertIn(f"código {codigo}", texto,
                           f"o guia nao explica o codigo de saida {codigo}")
+
+
+# ---------------------------------------------------------------------------
+# auditoria 2026-09-10 (5a rodada)
+# ---------------------------------------------------------------------------
+
+class TestNumerosDoGuiaDoOperador(unittest.TestCase):
+    """COMO-OPERAR.md — o documento de 500+ linhas que quem NAO programa vai
+    ler — estava FORA de TestNumerosQueOsDocumentosPrometem.DOCS, e a classe
+    TestGuiaDoOperador so conferia titulos de secao e nomes de parada.
+    Falsificar cinco numeros verdadeiros do guia (segundos por contato,
+    minutos por lista, tempo maximo padrao, maximo por lista, minimo por
+    lista) deixava as 10 suites verdes.
+
+    Cada assercao abaixo formata o numero A PARTIR DO CODIGO: mudar a
+    constante sem mudar o guia fica vermelho, e mudar o guia sozinho tambem."""
+
+    def setUp(self):
+        self.texto = _ler("COMO-OPERAR.md")
+
+    def test_limite_maximo_por_lista_e_o_do_codigo(self):
+        self.assertIn(f"até {rs.BROADCAST_LIMIT} por lista", self.texto)
+
+    def test_minimo_por_lista_e_o_do_codigo(self):
+        self.assertIn(f"menos de {rs.MIN_RECIPIENTS} pessoas", self.texto)
+
+    def test_tempo_maximo_padrao_e_o_do_parser(self):
+        padrao = rs.construir_parser().get_default("max_minutos")
+        self.assertIn(f"padrão {padrao:.0f} minutos", self.texto)
+
+    def test_estimativa_por_lista_cheia_bate_com_a_tela(self):
+        minutos = st.estimativa_minutos(0.1, 0.4)
+        self.assertIn(f"cerca de {minutos} minutos por lista de {rs.BROADCAST_LIMIT}",
+                      self.texto)
+
+    def test_segundos_por_contato_batem_com_a_conta_da_tela(self):
+        segundos = st.estimativa_minutos(0.1, 0.4) * 60 / rs.BROADCAST_LIMIT
+        self.assertIn(f"cerca de {segundos:.0f} segundos por contato", self.texto)
+
+    def test_numero_aposentado_nao_aparece(self):
+        self.assertNotIn("2,5 s", self.texto)
+        self.assertNotIn("2.5 s", self.texto)
+
+
+class TestGuiaSeparaOCodigo6DoCodigo7(unittest.TestCase):
+    """O guia dizia, na secao do codigo 7, que `orcamento de tempo da lista`
+    NAO cria lista "nem parcial". O codigo faz o oposto: com 2+ confirmados,
+    --approve-create e o seletor na tela, ele CRIA a lista parcial, avanca o
+    progresso e sai com 6 (e o proprio test_scroll_local.OrcamentoDeRelogio
+    trava esse 6). A operadora que estourasse o orcamento nao ia conferir o
+    iPhone — e havia uma lista de transmissao REAL criada na conta."""
+
+    def setUp(self):
+        self.texto = _ler("COMO-OPERAR.md")
+        self.sec6 = self.texto.index("(o código 6)")
+        self.sec7 = self.texto.index("(o código 7)")
+
+    def _secao_do_codigo_6(self):
+        return self.texto[self.sec6:self.sec7]
+
+    def _secao_do_codigo_7(self):
+        fim = self.texto.index("### ", self.sec7 + 10)
+        return self.texto[self.sec7:fim]
+
+    def test_a_secao_do_codigo_6_assume_o_orcamento_de_tempo(self):
+        self.assertIn("orcamento de tempo da lista", self._secao_do_codigo_6())
+
+    def test_a_secao_do_codigo_7_so_promete_o_caso_sem_toque(self):
+        sec7 = self._secao_do_codigo_7()
+        self.assertIn("durante a retomada", sec7)
+        self.assertIn(f"menos de {rs.MIN_RECIPIENTS} contatos confirmados", sec7)
+        self.assertNotIn("nem parcial. \nNada foi perdido", sec7)
+
+    def test_o_guia_nao_afirma_que_o_orcamento_nunca_cria_lista(self):
+        self.assertNotIn("e **não** criou lista nenhuma, nem parcial", self.texto)
+
+    def test_os_dois_documentos_do_scroll_livre_concordam(self):
+        """MODO-SCROLL-LIVRE.md ja dizia o certo; os dois se contradiziam
+        sobre a MESMA parada nomeada."""
+        modo = _ler("MODO-SCROLL-LIVRE.md")
+        self.assertIn("código 6", modo)
+        self.assertIn("orcamento de tempo da lista", self._secao_do_codigo_6())
+
+
+class TestGuiaNaoMandaUsarBotaoQueNaoExiste(unittest.TestCase):
+    """O §3.5 mandava "crie só uma lista e confira no aparelho" no modo lista
+    de contatos (o modo EM USO). Esse campo so existe no painel do Scroll
+    Livre, que a GUI esconde no modo arquivo (gui_ios._painel_scroll
+    grid_forget), e o comando montado para o modo CSV nao passa --max-lists
+    (cujo default 0 nunca corta). Um clique cria TODAS as listas do arquivo."""
+
+    def test_o_guia_nao_manda_criar_so_uma_lista_pela_tela_no_modo_arquivo(self):
+        texto = _ler("COMO-OPERAR.md")
+        self.assertNotIn("crie só uma lista e confira no aparelho", texto)
+        self.assertIn("arquivo pequeno", texto)
+
+    def test_a_gui_realmente_nao_passa_max_lists_no_modo_csv(self):
+        """Se um dia a GUI passar a mandar --max-lists, este teste avisa que o
+        guia pode voltar a falar de "criar so uma lista" pela tela."""
+        self.assertNotIn("--max-lists", _ler("gui_ios.py"))
+
+
+class TestInterpretadorDosComandosEUniforme(unittest.TestCase):
+    """Os 16 comandos do COMO-OPERAR e 2 do README mandavam rodar
+    `.venv/bin/python <script>.py`, mas NENHUM arquivo deste repositorio cria
+    um `.venv` (setup_mac.sh instala com `python3 -m pip install --user`, e
+    iniciar_gui.command/atualizar.command tem fallback explicito para
+    `python3`). Num Mac instalado como o COMO-ABRIR-NO-MAC.txt manda, esses
+    comandos morrem na hora com "no such file or directory".
+
+    O regex de TestComandosDosDocumentosExistem comeca em `([a-z_]+\\.py)`: o
+    interpretador nunca era olhado, entao qualquer caminho inexistente passava
+    verde."""
+
+    DOCS = TestComandosDosDocumentosExistem.DOCS
+
+    def test_nenhum_documento_manda_usar_um_venv_que_ninguem_cria(self):
+        for doc in self.DOCS:
+            self.assertNotIn(".venv/bin/python", _ler(doc),
+                             f"{doc} manda usar um .venv que nenhum script cria")
+
+    def test_nenhum_script_do_repositorio_cria_venv(self):
+        """A alternativa (fazer os .command criarem o venv) mudaria scripts em
+        uso. Enquanto ninguem criar, os docs nao podem prometer."""
+        for nome in os.listdir(BASE):
+            if not nome.endswith((".sh", ".command")):
+                continue
+            self.assertNotIn("-m venv", _ler(nome), nome)
+
+    def test_o_interpretador_citado_e_sempre_o_mesmo(self):
+        padrao = re.compile(r"(\S+)[ \t]+([a-z_]+\.py)\b")
+        interpretadores = set()
+        for doc in self.DOCS:
+            for m in padrao.finditer(_ler(doc)):
+                inter = m.group(1).strip("`(*_ ")
+                if inter.endswith("python") or inter.endswith("python3"):
+                    interpretadores.add(os.path.basename(inter))
+        self.assertEqual(interpretadores, {"python3"},
+                         f"documentos citam interpretadores diferentes: {interpretadores}")
+
+
+class TestValorDeFlagCitadoEValido(unittest.TestCase):
+    """`_PADRAO_FLAG` extraia so o NOME da flag: `--limite-por-lista 500`
+    (rejeitado por run_ios_scroll em tempo de execucao) ou `--resolver-incertos
+    sim` (fora das `choices`) passariam verdes num documento."""
+
+    DOCS = TestComandosDosDocumentosExistem.DOCS
+
+    @staticmethod
+    def _choices_do_script(nome: str) -> dict:
+        """{flag: [valores validos]} lido por AST do argparse daquele script."""
+        arvore = ast.parse(_ler(nome))
+        out: dict[str, list] = {}
+        for node in ast.walk(arvore):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "add_argument"):
+                continue
+            nomes = [a.value for a in node.args
+                     if isinstance(a, ast.Constant) and isinstance(a.value, str)
+                     and a.value.startswith("-")]
+            for kw in node.keywords:
+                if kw.arg != "choices":
+                    continue
+                try:
+                    valores = ast.literal_eval(kw.value)
+                except (ValueError, SyntaxError):
+                    continue
+                for flag in nomes:
+                    out[flag] = list(valores)
+        return out
+
+    def test_valor_citado_esta_nas_choices_do_argparse(self):
+        problemas = []
+        cache = {}
+        for doc in self.DOCS:
+            texto = _ler(doc)
+            for m in re.finditer(_PADRAO_COMANDO, texto):
+                script, resto = m.group(1), m.group(2)
+                if not os.path.exists(os.path.join(BASE, script)):
+                    continue
+                choices = cache.setdefault(script, self._choices_do_script(script))
+                for flag, valor in re.findall(
+                        r"(--[A-Za-z0-9\-]+)[ \t]+([^\s`\\-][^\s`\\]*)", resto):
+                    if flag in choices and valor not in [str(v) for v in choices[flag]]:
+                        problemas.append(f"{doc}: {script} {flag} {valor} fora de "
+                                         f"{choices[flag]}")
+        self.assertEqual(sorted(set(problemas)), [], "\n".join(sorted(set(problemas))))
+
+    def test_limite_por_lista_citado_cabe_entre_o_minimo_e_o_maximo(self):
+        problemas = []
+        for doc in self.DOCS:
+            for valor in re.findall(r"--limite-por-lista[ \t]+(\d+)", _ler(doc)):
+                n = int(valor)
+                if not (rs.MIN_RECIPIENTS <= n <= rs.BROADCAST_LIMIT):
+                    problemas.append(f"{doc}: --limite-por-lista {n} seria recusado "
+                                     f"({rs.MIN_RECIPIENTS}..{rs.BROADCAST_LIMIT})")
+        self.assertEqual(sorted(set(problemas)), [], "\n".join(sorted(set(problemas))))
+
+
+class TestDryRunDoRunIosUsaAFormulaViva(unittest.TestCase):
+    """MODO CSV, EM USO. `test_estimativa_em_minutos_bate_para_todos_os_presets`
+    trava a FUNCAO pura, mas ninguem chamava o `--dry-run` de verdade: trocar
+    a linha que o executa pela formula aposentada deixava as 300 provas verdes
+    e o terminal voltava a imprimir "~15 min" contra os "~22 min" que o
+    DEVICE-TEST-IOS promete."""
+
+    def _dry_run(self, pace, speed):
+        import csv
+        import io
+        import logging
+        import tempfile as _tmp
+        pasta = _tmp.mkdtemp()
+        csv_path = os.path.join(pasta, "c.csv")
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["nome", "telefone"])
+            for i in range(5):
+                w.writerow([f"Contato {i}", f"2199999{i:04d}"])
+        capturadas = []
+
+        class _H(logging.Handler):
+            def emit(self, record):
+                capturadas.append(record.getMessage())
+
+        h = _H()
+        alvo = logging.getLogger("run_ios")
+        nivel = alvo.level
+        alvo.setLevel(logging.INFO)
+        alvo.addHandler(h)
+        argv = sys.argv
+        sys.argv = ["run_ios.py", "--csv", csv_path, "--dry-run",
+                    "--pace", str(pace), "--speed", str(speed)]
+        try:
+            codigo = run_ios.main()
+        finally:
+            sys.argv = argv
+            alvo.removeHandler(h)
+            alvo.setLevel(nivel)
+        return codigo, "\n".join(capturadas)
+
+    def test_o_numero_impresso_e_o_da_funcao_para_varios_presets(self):
+        for nome, (speed, pace, _pl) in st.PRESETS_RITMO.items():
+            codigo, texto = self._dry_run(pace, speed)
+            self.assertEqual(codigo, 0, nome)
+            minutos = round(run_ios.estimativa_segundos(pace, speed) / 60)
+            self.assertIn(f"~{minutos} min", texto, f"{nome}: {texto}")
+            self.assertIn("dry-run", texto.lower())
+
+    def test_o_device_test_cita_o_mesmo_numero_do_terminal(self):
+        _codigo, texto = self._dry_run(1.0, 1.0)
+        minutos = round(run_ios.estimativa_segundos(1.0, 1.0) / 60)
+        self.assertIn(f"~{minutos} min", texto)
+        self.assertIn(f"~{minutos} min", _ler("DEVICE-TEST-IOS.md"))
+
+
+class TestTextoDoCodigo7NaoTranquilizaDemais(unittest.TestCase):
+    """O ramo `return 7` de uma rodada REAL com menos de 2 confirmados saia sem
+    fechar o seletor — e o texto da GUI dizia so "Nada foi perdido", sem uma
+    palavra sobre o seletor que podia ter ficado aberto e marcado no iPhone. No
+    commit pai o mesmo cenario saia como codigo 4, cujo texto manda fechar o
+    seletor. As duas paradas novas do diff chegam a esse ramo, entao ele deixou
+    de ser raro."""
+
+    def setUp(self):
+        self.texto = st.desfecho_para(7).orientacao
+
+    def test_manda_conferir_o_seletor(self):
+        self.assertIn("seletor no iPhone", self.texto)
+
+    def test_nao_afirma_que_nada_foi_perdido(self):
+        self.assertNotIn("Nada foi perdido", self.texto)
+
+    def test_diz_que_repetir_pode_nao_resolver(self):
+        self.assertIn("MESMO ponto", self.texto)
 
 
 if __name__ == "__main__":

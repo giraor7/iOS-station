@@ -69,7 +69,7 @@ Para validar a sequência no modo lista de contatos sem um CSV de 257 contatos,
 use lotes pequenos **só no teste**:
 
 ```bash
-.venv/bin/python run_ios.py --csv contatos.csv --trust-profile --approve-create --limite-por-lista 5 --max-lists 2
+python3 run_ios.py --csv contatos.csv --trust-profile --approve-create --limite-por-lista 5 --max-lists 2
 ```
 
 Um CSV com 10 contatos vira duas listas de 5 ("Transmissão 001" e "002" no
@@ -91,7 +91,7 @@ tenta de novo.
 Para ter os arquivos em mãos (botão **Exportar restantes…** na tela, ou):
 
 ```bash
-.venv/bin/python run_ios.py --csv contatos.csv --exportar
+python3 run_ios.py --csv contatos.csv --exportar
 ```
 
 Grava, ao lado do CSV importado e sem tocar no iPhone: `contatos.restantes.csv`
@@ -123,7 +123,7 @@ aparelho por fora. Não há atalho.
 
 ## Arquivos
 
-- `run_ios_scroll.py` — **Modo Scroll Livre** (sem CSV); `test_scroll_local.py` — 114 testes offline; `MODO-SCROLL-LIVRE.md` — guia.
+- `run_ios_scroll.py` — **Modo Scroll Livre** (sem CSV); `test_scroll_local.py` — 135 testes offline; `MODO-SCROLL-LIVRE.md` — guia.
 
 | Arquivo | O que faz |
 |---|---|

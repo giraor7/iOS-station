@@ -130,9 +130,32 @@ LIMITE_RECTS_INDIVIDUAIS = 40   # acima disto sem conseguir inferir posicao, par
 # (releitura da tela inteira) ainda nao consegue ler, uma linha de CONTATO
 # de um cabecalho de secao ("A", "B"...) ou outro elemento decorativo: a
 # altura de uma celula de contato e conhecida (a moda das celulas LEGIVEIS
-# desta mesma leitura); algo com altura bem diferente nao e contato e nao
-# para a lista.
+# desta mesma leitura).
+#
+# ATENCAO (auditoria 2026-09-10, 5a rodada): ate esta data o criterio era
+# `abs(h - h_modal) <= TOLERANCIA_ALTURA_LINHA`, isto e, SIMETRICO. Uma linha
+# de contato ilegivel 3 pt MAIS ALTA que a moda (recado que quebra em duas
+# linhas, contato sem recado, Dynamic Type — a altura da linha de contato
+# varia de verdade neste seletor) era classificada como "decoracao", nao
+# setava corte, e a lista passava por cima da pessoa em silencio: ela ficava
+# atras do ponto de retomada para sempre. Era o modo de erro 10 do projeto
+# devolvido pela porta dos fundos, e 3 pt de diferenca eram a fronteira entre
+# "parar para nao perder ninguem" e "perder alguem sem avisar".
+#
+# O criterio agora e ASSIMETRICO, e a assimetria e o que o aparelho permite
+# afirmar SEM medir nada novo: uma linha de contato pode ser mais ALTA que a
+# moda (conteudo a mais), nunca drasticamente mais BAIXA. Entao:
+#   - h >= h_modal - TOLERANCIA_ALTURA_LINHA  -> pode ser contato: PARA.
+#   - h claramente menor (<= h_modal * FRACAO_MAXIMA_DECORACAO) -> cabecalho
+#     de secao / separador: ignora e segue.
+#   - qualquer coisa no meio (mais baixa, mas nao a ponto de ser cabecalho)
+#     -> ambigua: PARA, que e o lado seguro.
+# A unica altura de cabecalho de que o repositorio tem registro (fixture do
+# teste) e ~28 pt contra ~64 pt de linha de contato, ou seja 0,44 da moda —
+# bem dentro de 0,6. Medir no iPhone permite apertar isto depois; nao medir
+# NAO devolve o "pular contato em silencio".
 TOLERANCIA_ALTURA_LINHA = 2.0
+FRACAO_MAXIMA_DECORACAO = 0.6
 PARADA_SEM_ROTULO = "celula sem rotulo (nao da para saber quem e)"
 PARADA_SEM_RECT = "celula sem posicao legivel (o rect nao respondeu)"
 
@@ -268,6 +291,21 @@ def max_telas_para_recuperacao(n_usados: int, teto_base: int) -> int:
     return min(max(int(teto_base), estimado), TETO_RECUPERACAO)
 
 
+def eh_decoracao(h: float, h_modal) -> bool:
+    """A celula ilegivel de altura `h` e decoracao (cabecalho de secao,
+    separador) e nao uma linha de contato?
+
+    Criterio ASSIMETRICO de proposito — ver o comentario de
+    TOLERANCIA_ALTURA_LINHA/FRACAO_MAXIMA_DECORACAO. Na duvida devolve False,
+    que e o lado que PARA a lista em vez de ultrapassar alguem em silencio.
+    """
+    if h_modal is None:
+        return False                       # sem moda nao da para comparar nada
+    if h >= h_modal - TOLERANCIA_ALTURA_LINHA:
+        return False                       # igual ou MAIS ALTA: pode ser contato
+    return h <= h_modal * FRACAO_MAXIMA_DECORACAO
+
+
 def eh_convite(nome_ou_rotulo: str) -> bool:
     """Celula 'Convidar para o WhatsApp' (abre o app Mensagens se tocada).
     Decidido pelo rotulo JA LIDO — sem nenhuma chamada extra ao WDA."""
@@ -327,11 +365,24 @@ class Progresso:
         if self.versao > 2:
             log.warning("progresso escrito por uma versao MAIS NOVA da estacao; "
                         "atualize por git pull antes de rodar")
-        elif self.versao == 1 and self.listas_criadas:
-            log.warning("progresso da versao 1: a guarda contra duplicata comeca "
-                        "VAZIA (a(s) %d lista(s) ja criada(s) nao gravaram a lista "
-                        "de hashes); ela passa a valer a partir da proxima lista "
-                        "criada", self.listas_criadas)
+        faltando = self.guarda_incompleta()
+        if faltando:
+            # A condicao era `self.versao == 1 and self.listas_criadas`
+            # (auditoria 2026-09-10, 5a rodada). Bastava UMA lista nova para
+            # salvar() regravar o arquivo como "versao": 2 e este aviso — o
+            # UNICO que existe sobre guarda cega — nunca mais aparecer, embora
+            # as listas antigas continuassem sem impressao digital. O operador
+            # passava a ler so "a guarda conhece N contato(s) ja usados", uma
+            # frase que afirma protecao, enquanto a guarda era cega para as
+            # outras centenas. A pergunta certa nao e a versao do arquivo, e a
+            # COBERTURA: quantas listas ja criadas nao gravaram hashes.
+            log.warning("a guarda contra duplicata nao sabe QUEM entrou em %d de %d "
+                        "lista(s) ja criada(s) (progresso da versao 1, ou entradas de "
+                        "historico sem a impressao digital dos contatos): sobre essas "
+                        "pessoas a guarda NAO protege — se a retomada derivar, elas "
+                        "podem entrar numa segunda lista. A guarda vale integralmente "
+                        "para as listas criadas de agora em diante.",
+                        faltando, self.listas_criadas)
 
     def salvar(self) -> None:
         d = {
@@ -418,6 +469,14 @@ class Progresso:
                     f"(logo apos {mask(self.ultimo_rotulo)})")
         if self.usados:
             base += f"; a guarda conhece {len(self.usados)} contato(s) ja usados"
+        faltando = self.guarda_incompleta()
+        if faltando:
+            # "a guarda conhece N" sozinho afirma protecao. Sem esta frase o
+            # resumo escondia que a protecao cobre so parte das listas.
+            base += (f"; a guarda cobre {self.listas_criadas - faltando} de "
+                     f"{self.listas_criadas} lista(s) ja criada(s) — a(s) "
+                     f"{faltando} restante(s) nao gravaram impressao digital e "
+                     f"podem ser duplicadas se a retomada derivar")
         pendentes = self.incertos_pendentes()
         if pendentes:
             listas = ", ".join(str(e.get("lista", "?")) for _, e in pendentes)
@@ -503,6 +562,10 @@ class ScrollLivre(IosSpike):
         # cortar nesta leitura.
         self._corte_y: float | None = None
         self._corte_motivo: str = ""
+        # Chave alfabetica do ponto de retomada desta lista ("" quando ela
+        # comeca do A). Fronteira do que ja esta em lista CRIADA — ver
+        # _descartar_corte_ja_processado.
+        self._chave_ancora: str = ""
         self._profundidade = None
         self._profundidade_reescalada = False   # 1 re-escalada por lista (orcamento de tempo)
         self._ultima_leitura_bruta = 0   # celulas que a BUSCA achou na ultima leitura
@@ -703,7 +766,14 @@ class ScrollLivre(IosSpike):
         t0 = time.monotonic()
         self._pico_consulta = 0.0
         try:
-            return self._ler_celulas_impl(margem)
+            cels = self._ler_celulas_impl(margem)
+            # O corte e propriedade da leitura CORRENTE e nasce da tela
+            # INTEIRA — inclusive da parte dela que ficou ATRAS do ponto de
+            # retomada. Descartar aqui, no fim de TODA leitura, e o que faz a
+            # regra valer em qualquer chamador (laco principal, ultima
+            # passada, retentativa) sem depender de nenhum deles lembrar.
+            self._descartar_corte_ja_processado(cels)
+            return cels
         finally:
             bloco = time.monotonic() - t0
             self._duracoes_leitura.append(self._pico_consulta)
@@ -793,16 +863,17 @@ class ScrollLivre(IosSpike):
             alturas = Counter(round(h, 1) for _, h in lidas)
             h_modal = alturas.most_common(1)[0][0] if alturas else None
             for y, h in ilegiveis:
-                if h_modal is None or abs(h - h_modal) <= TOLERANCIA_ALTURA_LINHA:
-                    # tem a altura da LINHA DE CONTATO: e um contato que nao
+                if eh_decoracao(h, h_modal):
+                    # claramente mais BAIXA que a linha de contato: cabecalho
+                    # de secao ("A", "B"), separador, decoracao. Nao para.
+                    self.stats["sem_rotulo_ignorado"] += 1
+                else:
+                    # pode ser a altura de uma LINHA DE CONTATO (igual, mais
+                    # alta, ou so um pouco mais baixa): e um contato que nao
                     # disse o nome — nao pode ser ultrapassado em silencio.
                     self.stats["sem_rotulo"] += 1
                     if self._corte_y is None or y < self._corte_y:
                         self._corte_y, self._corte_motivo = y, PARADA_SEM_ROTULO
-                else:
-                    # altura diferente: cabecalho de secao ("A", "B"),
-                    # separador, decoracao. Nao e contato, nao para a lista.
-                    self.stats["sem_rotulo_ignorado"] += 1
             for ultimo_y in sem_posicao:
                 self.stats["sem_rect"] += 1
                 c = 0.0 if ultimo_y is None else ultimo_y + 0.5
@@ -938,11 +1009,91 @@ class ScrollLivre(IosSpike):
 
     # ---------- retomada ----------
 
+    def _registrar_bloqueio_guarda(self, c) -> None:
+        """GUARDA: este contato ja entrou numa lista CRIADA em rodada(s)
+        anteriores (prog.usados). Nunca e tocado.
+
+        DUAS CAUSAS POSSIVEIS, e a tela nao permite distinguir (auditoria
+        2026-09-10, 4a rodada — a hipotese de separar por ordem alfabetica foi
+        TESTADA e REFUTADA: um homonimo cross-lista carrega a chave alfabetica
+        do original, que e sempre <= a ancora, e a deriva de retomada devolve
+        gente com chave > ancora: os dois casos caem em lados OPOSTOS do que o
+        criterio previa):
+
+         (a) DERIVA DE RETOMADA / TRAVESSIA DA LISTA DE RECUPERACAO — a mesma
+             pessoa reaparecendo. Ninguem perde nada: a guarda so evita a
+             duplicata.
+         (b) HOMONIMO CROSS-LISTA — OUTRA pessoa com o mesmo nome de alguem de
+             uma lista anterior. Ela nao pode ser tocada (tocar desmarcaria a
+             primeira, e nao da para distinguir as duas) e a perda e
+             PERMANENTE: a proxima ancora passa por cima dela.
+
+        Este metodo existe porque o registro estava em UM dos tres lugares que
+        a guarda bloqueia (5a rodada da auditoria):
+         - o laco principal registrava, mas so quando NAO era lista de
+           recuperacao — e na recuperacao o log ainda chamava a perda
+           permanente de "exatamente o trabalho dela";
+         - a ULTIMA PASSADA (margem=0, borda inferior da agenda) so somava o
+           contador e nao gravava hash nenhum — justamente onde cai o
+           homonimo da ultima linha da agenda, que a leitura com margem nunca
+           enxerga.
+        Registrar nos tres nao enfraquece a trava (a celula continua sem ser
+        tocada): so deixa rastro de uma perda que pode ser permanente.
+        """
+        self.stats["bloqueados_guarda"] += 1
+        self.bloqueados_apos_retomada.append(c.hash)
+
+    def _descartar_corte_ja_processado(self, cels: list) -> None:
+        """Uma celula ilegivel que esta na tela ANTES do ponto de retomada ja
+        foi tratada em lista(s) anterior(es): ela nao pode barrar as celulas
+        que vem DEPOIS da retomada.
+
+        Sem isto (auditoria 2026-09-10, 5a rodada) a rodada travava para
+        sempre: o corte e calculado sobre a tela INTEIRA, a primeira celula
+        boa devolvida por _retomar ja caia depois dele, a lista parava com 0
+        confirmados (codigo 7, progresso intacto) e a rodada seguinte, sem
+        nada ter mudado, fazia exatamente o mesmo. O log ainda afirmava que a
+        celula ilegivel era "a proxima da fila", quando ela ja estava numa
+        lista criada.
+
+        A fronteira e a CHAVE ALFABETICA da ancora de retomada, nao "a ultima
+        celula tocada/ignorada": tudo com chave <= ancora ja entrou em lista
+        criada, por definicao do progresso. Usar a ultima tocada abriria um
+        buraco real — entre a ancora e o primeiro toque pode haver celulas
+        puladas por filtro de DDD, convite ou guarda, e uma celula ilegivel
+        entre elas seria descartada em silencio.
+
+        Comparacao com `<=` de proposito: o corte por celula SEM RECT nasce
+        em `ultimo_y_ok + 0.5`, isto e, logo ABAIXO da ultima celula legivel.
+        Quando essa ultima celula legivel e a propria ancora, o elemento sem
+        rect esta DEPOIS dela — e esse corte fica de pe.
+        """
+        if self._corte_y is None or not self._chave_ancora:
+            return
+        # PREFIXO da tela (as celulas ja vem ordenadas por y), nunca "toda
+        # celula com chave <= ancora": a agenda e alfabetica, entao os ja
+        # incluidos sao um prefixo. Parar no primeiro contato NOVO garante que
+        # uma celula qualquer mais abaixo — homonimo, colisao de chave — nunca
+        # empurre a fronteira para depois de uma celula ilegivel de verdade.
+        ys = []
+        for c in cels:
+            if chave_ordem(c.nome) > self._chave_ancora:
+                break
+            ys.append(c.y)
+        if ys and self._corte_y <= max(ys):
+            log.info("uma celula ilegivel apareceu ANTES do ponto de retomada "
+                     "(ela ja esta em lista anterior): o corte dela nao vale "
+                     "para as celulas seguintes")
+            self._corte_y, self._corte_motivo = None, ""
+
     def _retomar(self, prog: Progresso, cels: list) -> list:
         """Leva a lista ate o ultimo contato da rodada anterior e devolve as
         celulas da tela atual que vem DEPOIS dele."""
         alvo_hash = prog.ultimo_hash
         alvo_chave = chave_ordem(prog.ultimo_rotulo)
+        # fronteira do que JA ESTA em lista criada; vale ate o fim desta lista
+        # (ver _descartar_corte_ja_processado)
+        self._chave_ancora = alvo_chave
         log.info("retomando: procurando o ultimo contato da lista anterior (%s)",
                  mask(prog.ultimo_rotulo))
         voltou = False
@@ -950,10 +1101,27 @@ class ScrollLivre(IosSpike):
         for tela in range(MAX_TELAS_RETOMADA):
             if self._orcamento_estourou():
                 self.parada = "orcamento de tempo da lista (durante a retomada)"
+                # log.error explicito: `sp.parada` ja esta setado, entao main()
+                # descarta o texto da excecao (`sp.parada or str(exc)`) e o
+                # operador nunca lia esta orientacao. Ate 2026-09-10 (5a
+                # rodada) ela ainda dizia "aumente --max-minutos OU RODE DE
+                # NOVO" — e rodar de novo e exatamente o que NAO resolve:
+                # nada foi tocado, o progresso nao mudou, a rodada seguinte
+                # gasta o mesmo tempo e para no mesmo lugar (livelock).
+                log.error("o tempo maximo desta lista (%.0f min) acabou depois de "
+                          "%d tela(s) ANTES de achar o ponto de retomada: nada foi "
+                          "tocado e o progresso NAO mudou. RODAR DE NOVO NAO "
+                          "RESOLVE — a proxima rodada comeca no mesmo ponto e para "
+                          "no mesmo lugar. Rode pelo Terminal com --max-minutos "
+                          "maior (a estacao sempre manda o padrao e nao tem campo "
+                          "para mudar isso).", self.max_segundos / 60,
+                          self.stats["telas_retomada"])
                 raise UiChanged(
                     "o tempo maximo desta lista acabou ANTES de achar o ponto de "
-                    "retomada; nada foi tocado e o progresso nao mudou — aumente "
-                    "--max-minutos ou rode de novo")
+                    "retomada; nada foi tocado e o progresso NAO mudou. RODAR DE "
+                    "NOVO NAO RESOLVE: a proxima rodada comeca no mesmo ponto, "
+                    "gasta o mesmo tempo e para no mesmo lugar. Rode pelo Terminal "
+                    "com --max-minutos maior (a estacao sempre manda o padrao)")
             self.stats["telas_retomada"] += 1
             if not cels:
                 if self.in_picker():
@@ -963,6 +1131,7 @@ class ScrollLivre(IosSpike):
             if idx is not None:
                 log.info("ponto de retomada encontrado apos %d tela(s)", tela + 1)
                 self.ignorar.update(c.hash for c in cels[:idx + 1])
+                self._descartar_corte_ja_processado(cels)
                 return cels[idx + 1:]
             chaves = [chave_ordem(c.nome) for c in cels]
             hashes = {c.hash for c in cels}
@@ -991,7 +1160,9 @@ class ScrollLivre(IosSpike):
                 # Continua do primeiro contato alfabeticamente DEPOIS dele.
                 log.warning("o ultimo contato da rodada anterior nao existe mais na "
                             "agenda; continuando do proximo em ordem alfabetica")
-                self.ignorar.update(c.hash for c in cels if chave_ordem(c.nome) <= alvo_chave)
+                self.ignorar.update(c.hash for c in cels
+                                    if chave_ordem(c.nome) <= alvo_chave)
+                self._descartar_corte_ja_processado(cels)
                 return [c for c in cels if chave_ordem(c.nome) > alvo_chave]
             cels = self._ler_celulas()
         raise UiChanged(
@@ -1265,6 +1436,7 @@ class ScrollLivre(IosSpike):
         self.em_recuperacao = bool(prog.usados) and not prog.ultimo_hash
         convites_vistos = set()
         self.bloqueados_apos_retomada = []
+        self._chave_ancora = ""   # so _retomar define; lista do A nao tem fronteira
         self._topo = 0.0
         cels = self._ler_celulas()
         if not cels:
@@ -1360,36 +1532,7 @@ class ScrollLivre(IosSpike):
                         self._logar_filtrados()
                         return len(self.ordem)
                 if c.hash in self.usados:
-                    # GUARDA: este contato ja entrou numa lista CRIADA em
-                    # rodada(s) anteriores (prog.usados). Nunca e tocado — a
-                    # trava e a mesma nos dois ramos abaixo; o que muda e o
-                    # MOTIVO relatado ao operador. Fica antes do filtro de DDD
-                    # de proposito: nenhum dos dois numeros mede o filtro.
-                    self.stats["bloqueados_guarda"] += 1
-                    if not self.em_recuperacao:
-                        # DUAS CAUSAS POSSIVEIS, e a tela nao permite distinguir
-                        # (auditoria 2026-09-10, 4a rodada — a hipotese de
-                        # separar por ordem alfabetica foi TESTADA e REFUTADA:
-                        # um homonimo cross-lista carrega a chave alfabetica do
-                        # original, que e sempre <= a ancora, e a deriva de
-                        # retomada devolve gente com chave > ancora — os dois
-                        # casos caem em lados OPOSTOS do que o criterio previa):
-                        #
-                        #  (a) DERIVA DE RETOMADA — a mesma pessoa reaparecendo
-                        #      porque a ancora parou cedo demais. Ninguem perde
-                        #      nada: a guarda so evita a duplicata.
-                        #  (b) HOMONIMO CROSS-LISTA — OUTRA pessoa com o mesmo
-                        #      nome de alguem de uma lista anterior. Ela nao
-                        #      pode ser tocada (tocar desmarcaria a primeira, e
-                        #      nao da para distinguir as duas) e a perda e
-                        #      PERMANENTE: a proxima ancora passa por cima dela.
-                        #
-                        # O caso (b) nao tinha NENHUM registro — nem no
-                        # historico, nem no log — e o unico numero visivel
-                        # mandava o operador investigar "retomada imprecisa",
-                        # o diagnostico errado. Agora os hashes ficam gravados
-                        # e o aviso nomeia as duas causas.
-                        self.bloqueados_apos_retomada.append(c.hash)
+                    self._registrar_bloqueio_guarda(c)
                     continue
                 if self.permitidos is not None and c.hash not in self.permitidos:
                     if c.hash not in self._filtrados_vistos:
@@ -1506,8 +1649,13 @@ class ScrollLivre(IosSpike):
                         if len(self.ordem) >= self.limite:
                             break
                         if c.hash in self.ignorar or c.hash in self.tocados or c.hash in self.usados:
-                            if c.hash in self.usados and c.hash not in self.ignorar and c.hash not in self.tocados:
-                                self.stats["bloqueados_guarda"] += 1
+                            if (c.hash in self.usados and c.hash not in self.ignorar
+                                    and c.hash not in self.tocados):
+                                # mesmo registro do laco principal: aqui e a
+                                # ULTIMA linha da agenda, o unico lugar onde um
+                                # homonimo cross-lista pode ser bloqueado sem
+                                # que o laco principal chegue a ve-lo.
+                                self._registrar_bloqueio_guarda(c)
                             continue
                         if self._corte_y is not None and c.y >= self._corte_y:
                             if self.pular_sem_rotulo:
@@ -1641,15 +1789,29 @@ class ScrollLivre(IosSpike):
                      self.stats["filtrados"], self.stats["telas"])
         if self.stats.get("bloqueados_guarda"):
             if self.em_recuperacao:
-                log.info("guarda: %d celula(s) ja em lista anterior foram "
-                         "atravessadas sem toque nesta lista de recuperacao — era "
-                         "exatamente o trabalho dela antes de chegar em gente nova",
-                         self.stats["bloqueados_guarda"])
+                # NUNCA afirmar "era exatamente o trabalho dela": a travessia
+                # da lista de recuperacao e a causa da MAIORIA desses
+                # bloqueios, mas a tela nao permite provar que e a causa de
+                # TODOS. Um homonimo cross-lista (outra pessoa com o mesmo
+                # nome) cai neste mesmo contador e a perda dele e permanente.
+                # Ate 2026-09-10 (5a rodada) esta linha saia em INFO
+                # anunciando trabalho esperado.
+                log.warning("guarda: %d celula(s) ja em lista anterior foram "
+                            "atravessadas sem toque nesta lista de recuperacao. A "
+                            "maior parte e a travessia esperada (as MESMAS pessoas, "
+                            "nada perdido), mas a tela nao distingue delas um "
+                            "homonimo — outra pessoa com o mesmo nome de alguem ja "
+                            "incluido, que nao entra em lista nenhuma. Os codigos "
+                            "ficam no progresso, em bloqueados_apos_retomada.",
+                            self.stats["bloqueados_guarda"])
             else:
                 log.warning("guarda: %d celula(s) nao foram tocadas porque o contato "
                             "ja entrou numa lista anterior (ninguem foi duplicado)",
                             self.stats["bloqueados_guarda"])
-        if self.bloqueados_apos_retomada:
+        if self.bloqueados_apos_retomada and not self.em_recuperacao:
+            # Na lista de RECUPERACAO o aviso acima ja nomeia as duas causas
+            # com os mesmos numeros; repetir aqui so trocaria o vocabulario
+            # ("depois da retomada" numa lista que nao tem retomada).
             # Duas causas, e a tela nao distingue (ver selecionar). Nomear as
             # duas e o unico jeito honesto: dizer so "deriva de retomada"
             # mandava o operador para o problema errado quando a causa era a
@@ -1812,6 +1974,47 @@ def construir_parser() -> argparse.ArgumentParser:
                          "duas vezes no mesmo ponto")
     ap.add_argument("-v", "--verbose", action="store_true")
     return ap
+
+
+def _gravar_avisos_no_historico(prog: Progresso, sp) -> None:
+    """Grava na ULTIMA entrada do historico os avisos que dizem quem pode ter
+    ficado de fora desta lista.
+
+    Existe como funcao unica porque o bloco estava DUPLICADO entre o ramo de
+    lista completa e o de lista parcial, e so o da completa tinha teste:
+    apagar o do ramo parcial deixava a suite inteira verde e o unico rastro de
+    uma perda permanente (homonimo cross-lista, bloqueio da guarda, celula
+    pulada) sumia do progresso — justamente no desfecho mais comum das duas
+    paradas novas (auditoria 2026-09-10, 5a rodada).
+    """
+    ent = prog.historico[-1]
+    if sp.homonimos:
+        ent["homonimos_ignorados"] = list(dict.fromkeys(sp.homonimos))
+        ent["homonimos_aviso"] = (
+            "contato(s) com o mesmo nome de alguem ja tocado nao entraram em "
+            "lista nenhuma (perda permanente)")
+    if sp.bloqueados_apos_retomada:
+        ent["bloqueados_apos_retomada"] = list(
+            dict.fromkeys(sp.bloqueados_apos_retomada))
+        ent["bloqueados_apos_retomada_aviso"] = (
+            "celulas ja em lista anterior que a guarda bloqueou: ou a retomada "
+            "parou cedo / a lista de recuperacao estava atravessando quem ja "
+            "entrou (nada perdido), ou sao pessoas diferentes com o mesmo nome "
+            "de alguem ja incluido (essas nao entram em lista nenhuma)")
+    if sp.pulados:
+        ent["celulas_sem_rotulo_puladas"] = list(sp.pulados)
+        # "ate": este numero conta OBSERVACOES de celula ilegivel, nao pessoas.
+        # A mesma celula reaparece na sobreposicao de 3 celulas entre telas e
+        # e contada de novo; e uma celula ilegivel antes do ponto de retomada
+        # pode ser alguem que JA ESTA numa lista criada. Afirmar "N pessoas
+        # nao entraram em lista nenhuma" e um numero que o codigo nao sustenta
+        # (auditoria 2026-09-10, 5a rodada).
+        ent["aviso"] = (
+            f"ate {len(sp.pulados)} pessoa(s) nao entraram em lista nenhuma: a "
+            "celula nao devolvia nome/posicao e o operador autorizou pular. "
+            "Pode ser menos (a mesma celula e reobservada entre telas, e uma "
+            "celula ja incluida em lista anterior tambem entra nesta conta)")
+    prog.salvar()
 
 
 def main() -> int:
@@ -2057,9 +2260,14 @@ def main() -> int:
                             "Se faltar alguem, e por aqui que se comeca a procurar.",
                             sp.stats["sem_rotulo"])
             if sp.stats.get("sem_rotulo_ignorado"):
-                log.info("%d linha(s) sem rotulo com altura diferente da linha de "
-                         "contato (cabecalho de secao?) — ignoradas, a lista seguiu",
-                         sp.stats["sem_rotulo_ignorado"])
+                # WARNING, e sem afirmar a hipotese: "cabecalho de secao" era
+                # so a explicacao mais provavel, e a linha saia em INFO como
+                # se nao houvesse nada a conferir.
+                log.warning("%d linha(s) sem rotulo foram IGNORADAS por serem bem "
+                            "mais baixas que a linha de contato (cabecalho de secao, "
+                            "separador). A lista seguiu por cima delas: se faltar "
+                            "alguem nesta lista, e por aqui que se comeca a procurar",
+                            sp.stats["sem_rotulo_ignorado"])
             if sp.stats.get("sem_rect"):
                 log.warning("%d celula(s) sem posicao legivel (o rect nao "
                             "respondeu) — quase sempre um elemento que ficou "
@@ -2090,25 +2298,7 @@ def main() -> int:
                     prog.registrar_lista(sp.ordem)
                     prog.historico[-1]["parcial"] = True
                     prog.historico[-1]["motivo_da_parada"] = sp.parada
-                    if sp.homonimos:
-                        prog.historico[-1]["homonimos_ignorados"] = list(dict.fromkeys(sp.homonimos))
-                        prog.historico[-1]["homonimos_aviso"] = (
-                            "contato(s) com o mesmo nome de alguem ja tocado nao "
-                            "entraram em lista nenhuma (perda permanente)")
-                    if sp.bloqueados_apos_retomada:
-                        prog.historico[-1]["bloqueados_apos_retomada"] = list(
-                            dict.fromkeys(sp.bloqueados_apos_retomada))
-                        prog.historico[-1]["bloqueados_apos_retomada_aviso"] = (
-                            "celulas ja em lista anterior que apareceram depois do "
-                            "ponto de retomada: ou a retomada parou cedo (nada "
-                            "perdido) ou sao pessoas diferentes com o mesmo nome de "
-                            "alguem ja incluido (essas nao entram em lista nenhuma)")
-                    if sp.pulados:
-                        prog.historico[-1]["celulas_sem_rotulo_puladas"] = list(sp.pulados)
-                        prog.historico[-1]["aviso"] = (
-                            f"{len(sp.pulados)} pessoa(s) nao entraram em lista "
-                            "nenhuma: a celula nao devolvia nome/posicao e o "
-                            "operador autorizou pular")
+                    _gravar_avisos_no_historico(prog, sp)
                     if sp.incerteza:
                         # Janela de incerteza: hashes tocados numa rajada que nao
                         # pode ser confirmada nem re-tocada (nunca nomes/numeros).
@@ -2187,6 +2377,19 @@ def main() -> int:
                 log.error("selecao interrompida por uma regra da estacao e nao deu "
                          "para salvar nada: %d toque(s) confirmado(s) ficam de fora, "
                          "progresso NAO avancou (motivo: %s)", qtd, sp.parada)
+                # O seletor fica ABERTO e MARCADO no iPhone se ninguem fechar:
+                # este ramo (rodada de verdade, menos de MIN_RECIPIENTS
+                # confirmados) nao passava nem pelo cancelamento do ensaio nem
+                # pelo do fim de agenda. Com as duas paradas novas (orcamento
+                # de relogio e celula sem rotulo) ele deixou de ser raro
+                # (auditoria 2026-09-10, 5a rodada).
+                try:
+                    sp.cancelar_seletor()
+                except (UiChanged, WebDriverException) as exc4:
+                    log.warning("nao consegui cancelar o seletor (%s): ele pode ter "
+                                "ficado ABERTO no iPhone com %d contato(s) marcado(s) "
+                                "— confira e feche na mao antes da proxima rodada",
+                                exc4, qtd)
                 print(json.dumps({
                     "listas_criadas_nesta_rodada": criadas, "offset": prog.offset,
                     "proximo_contato_n": prog.offset + 1,
@@ -2210,27 +2413,7 @@ def main() -> int:
             sp.finish(approve_create=True)     # so clica se "Criar" estiver habilitado
             criadas += 1
             prog.registrar_lista(sp.ordem)
-            if sp.homonimos:
-                prog.historico[-1]["homonimos_ignorados"] = list(dict.fromkeys(sp.homonimos))
-                prog.historico[-1]["homonimos_aviso"] = (
-                    "contato(s) com o mesmo nome de alguem ja tocado nao entraram "
-                    "em lista nenhuma (perda permanente)")
-                prog.salvar()
-            if sp.bloqueados_apos_retomada:
-                prog.historico[-1]["bloqueados_apos_retomada"] = list(
-                    dict.fromkeys(sp.bloqueados_apos_retomada))
-                prog.historico[-1]["bloqueados_apos_retomada_aviso"] = (
-                    "celulas ja em lista anterior que apareceram depois do ponto de "
-                    "retomada: ou a retomada parou cedo (nada perdido) ou sao "
-                    "pessoas diferentes com o mesmo nome de alguem ja incluido "
-                    "(essas nao entram em lista nenhuma)")
-                prog.salvar()
-            if sp.pulados:
-                prog.historico[-1]["celulas_sem_rotulo_puladas"] = list(sp.pulados)
-                prog.historico[-1]["aviso"] = (
-                    f"{len(sp.pulados)} pessoa(s) nao entraram em lista nenhuma: a "
-                    "celula nao devolvia nome/posicao e o operador autorizou pular")
-                prog.salvar()
+            _gravar_avisos_no_historico(prog, sp)
             log.info("lista %d criada. %s", numero_lista, prog.resumo())
             if qtd < args.limite_por_lista:
                 log.info("a agenda acabou nesta lista; nao ha mais o que criar")

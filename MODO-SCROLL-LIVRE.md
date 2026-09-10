@@ -286,7 +286,7 @@ marcado, o botão Iniciar explica o que falta.
 | `o WDA nao respondeu a nenhuma consulta` | Diferente do anterior: a sessão do WebDriverAgent caiu (socket hang up). A tela do iPhone pode estar intacta, com contatos marcados. Confira o aparelho, cancele o seletor e veja `TRAVOU-EM-OPENING-BROADCAST.md`. |
 | `ancora nao confirmada apos rajada turbo` | A rajada saiu e o botão "Criar" não voltou em duas conferências. Os toques dessa rajada ficam EM DÚVIDA: o progresso grava `toques_incertos` e a lista pode ter mais destinatários do que o progresso diz. **Confira no iPhone** — esses contatos podem reaparecer na lista seguinte. |
 | `a lista de recuperacao nao cabe no tempo maximo` (código 8) | Depois de `--recomecar-do-A`, a lista precisa rolar por cima de **todos** os já usados antes de chegar em alguém novo, e essa travessia sozinha passa do `--max-minutos`. A estação recusa na largada, sem tocar em nada — a rodada gastaria a hora inteira e terminaria com zero contatos, sem avançar o progresso. O log diz de quantos minutos ela precisa. |
-| aviso `celula(s) apareceram depois da retomada` | Contatos já em lista anterior reapareceram além da âncora. Ou a retomada parou cedo (as MESMAS pessoas, nada perdido) ou são pessoas **diferentes** com o mesmo nome de alguém já incluído — e essas não entram em lista nenhuma. A tela não distingue as duas; os códigos ficam no progresso, em `bloqueados_apos_retomada`. |
+| aviso `celula(s) apareceram depois da retomada` (ou, na lista de recuperação, `guarda: N celula(s) ja em lista anterior`) | Contatos já em lista anterior foram bloqueados pela guarda. Ou é reobservação esperada (a retomada parou cedo, ou a lista de recuperação está atravessando quem já entrou: as MESMAS pessoas, nada perdido), ou são pessoas **diferentes** com o mesmo nome de alguém já incluído — e essas não entram em lista nenhuma. A tela não distingue as duas; os códigos ficam no progresso, em `bloqueados_apos_retomada`, **nos dois casos** (até 2026-09-10 a lista de recuperação não registrava nada). |
 | `botao Criar esta DESABILITADO` | Menos de 2 selecionados. Fim da agenda ou o toque não está marcando: rode o ensaio com `-v` e mande o log. |
 | `nenhuma celula de contato no seletor` | Profundidade da árvore mudou (WhatsApp novo). Rode `probe_picker.py` e mande o resultado. |
 | WDA caiu / `socket hang up` | Igual ao fluxo validado: veja `TRAVOU-EM-OPENING-BROADCAST.md`. |
@@ -339,4 +339,4 @@ seletor (faixa de chips, células parciais, homônimos, convite, contato apagado
 retomada longe, fim da agenda, rajada interrompida, teto de telas, leitura
 lenta, profundidade que muda depois do 1o chip, guarda contra duplicata,
 orçamento de tempo, célula sem rótulo/sem posição legível, e o proprio `main()`
-criando a lista parcial). 114 casos.
+criando a lista parcial). 135 casos.

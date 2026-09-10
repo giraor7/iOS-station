@@ -93,8 +93,16 @@ confirmação com o modo, o arquivo, os DDDs, quantos contatos e quantas listas 
 e o nome das listas (o padrão do WhatsApp: a estação não renomeia). Leia e
 confirme. Durante a execução, **não mexa no iPhone**.
 
-**Na primeira vez do dia, crie só uma lista e confira no aparelho** antes de
-soltar o resto.
+**Na primeira vez do dia, comece pequeno.** Neste modo a tela **não** tem um
+campo de "quantas listas nesta rodada" (esse campo só existe no Modo Scroll
+Livre), e um clique cria **todas** as listas do arquivo em sequência. Para
+conferir antes de soltar tudo, faça uma destas duas coisas:
+
+- importe um **arquivo pequeno** (5 a 10 contatos), crie, confira no iPhone, e
+  só então importe o arquivo completo; **ou**
+- clique em **Parar com segurança** assim que o log mostrar a primeira lista
+  criada. A lista que estiver em andamento nesse instante não é salva (§3.6);
+  as já criadas ficam.
 
 ### 3.6 Dividir a criação em vários dias
 
@@ -115,12 +123,12 @@ Detalhes que importam:
 - Quem saiu como **não encontrado** ou **ambíguo** também fica de fora nas
   próximas rodadas, porque cada um custa uns 3 segundos para falhar de novo.
   Para tentar esses de novo, é pelo Terminal:
-  `.venv/bin/python run_ios.py --csv contatos.csv --repetir-nao-encontrados`
+  `python3 run_ios.py --csv contatos.csv --repetir-nao-encontrados`
 
 ### 3.7 Exportar os restantes
 
 Botão **Exportar restantes…** no cartão do arquivo (ou, pelo Terminal:
-`.venv/bin/python run_ios.py --csv contatos.csv --exportar`).
+`python3 run_ios.py --csv contatos.csv --exportar`).
 
 Grava, na mesma pasta do arquivo importado e **sem tocar no iPhone**:
 
@@ -191,23 +199,23 @@ teste da tentativa anterior:
 
 ```
 cd ~/Trabalho/"Marcelo Queiroz"/ios-station
-.venv/bin/python run_ios_scroll.py --reset-progresso
+python3 run_ios_scroll.py --reset-progresso
 ```
 
 ### Degrau 1 — 5 contatos
 
 ```
 # ensaio: marca 5 e cancela, não cria nada
-.venv/bin/python run_ios_scroll.py --trust-profile --limite-por-lista 5
+python3 run_ios_scroll.py --trust-profile --limite-por-lista 5
 
 # lista real de teste com 5
-.venv/bin/python run_ios_scroll.py --trust-profile --limite-por-lista 5 --approve-create
+python3 run_ios_scroll.py --trust-profile --limite-por-lista 5 --approve-create
 
 # onde parou
-.venv/bin/python run_ios_scroll.py --progresso
+python3 run_ios_scroll.py --progresso
 
 # segunda lista: tem de começar no 6º contato — confira no iPhone
-.venv/bin/python run_ios_scroll.py --trust-profile --limite-por-lista 5 --approve-create
+python3 run_ios_scroll.py --trust-profile --limite-por-lista 5 --approve-create
 ```
 
 Fechou limpo quando: a segunda lista começou exatamente no 6º contato e as duas
@@ -219,8 +227,8 @@ Os degraus 1 e 2 também podem ser feitos pela tela: modo **Usar Scroll Livre** 
 ### Degrau 2 — 30 contatos
 
 ```
-.venv/bin/python run_ios_scroll.py --trust-profile --limite-por-lista 30
-.venv/bin/python run_ios_scroll.py --trust-profile --limite-por-lista 30 --approve-create
+python3 run_ios_scroll.py --trust-profile --limite-por-lista 30
+python3 run_ios_scroll.py --trust-profile --limite-por-lista 30 --approve-create
 ```
 
 Confira no iPhone: a lista criada tem 30 destinatários? Se tiver menos, o log diz
@@ -231,8 +239,8 @@ por quê (procure "homonimos ignorados" e "sem rotulo" no resumo da lista).
 Este degrau **só existe pelo Terminal** (a tela oferece 5, 30 e lista cheia).
 
 ```
-.venv/bin/python run_ios_scroll.py --trust-profile --limite-por-lista 100
-.venv/bin/python run_ios_scroll.py --trust-profile --limite-por-lista 100 --approve-create
+python3 run_ios_scroll.py --trust-profile --limite-por-lista 100
+python3 run_ios_scroll.py --trust-profile --limite-por-lista 100 --approve-create
 ```
 
 É aqui que aparece, se aparecer, a lentidão da leitura com muitos selecionados.
@@ -241,7 +249,7 @@ Este degrau **só existe pelo Terminal** (a tela oferece 5, 30 e lista cheia).
 ### Degrau 4 — 256 (lista cheia)
 
 ```
-.venv/bin/python run_ios_scroll.py --trust-profile --approve-create --max-listas 1
+python3 run_ios_scroll.py --trust-profile --approve-create --max-listas 1
 ```
 
 Sem `--limite-por-lista`, ele usa 256, que é o padrão. **Uma lista só**, e
@@ -283,9 +291,10 @@ olhar de vez em quando. O que procurar:
   Se a lista saiu menor do que você esperava, a resposta está nesses números.
 - **`sem rotulo`** com número acima de zero — vem também como aviso separado.
   São células que não devolveram o nome em duas leituras. Se a altura da célula
-  é a de uma linha de contato de verdade, a lista **para** antes de ultrapassá-la
+  pode ser a de uma linha de contato, a lista **para** antes de ultrapassá-la
   (em vez de descartar em silêncio) — ela é a próxima da fila na rodada
-  seguinte. Um cabeçalho de seção (altura diferente) não para a lista.
+  seguinte. Só um cabeçalho de seção (bem mais baixo) não para a lista, e mesmo
+  esse aparece no log como aviso.
 - **linhas começando com `WARNING` / `ERROR`** — aparecem em amarelo e vermelho.
 
 O log **não** mostra nome nem número de ninguém. Um contato aparece como um
@@ -304,17 +313,34 @@ segurança — e o que fazer nesse caso.
 2 contatos confirmados e o seletor ainda estava na tela — então a estação clicou
 em "Criar" com o que tinha, em vez de perder tudo.
 
+No log o motivo aparece como `motivo_da_parada`. **O tempo máximo da lista
+(`orcamento de tempo da lista`) cai aqui**, e não no código 7, sempre que no
+momento do estouro já havia 2 ou mais contatos confirmados, o modo era "criar de
+verdade" e o seletor ainda estava na tela: nesse caso a lista **é criada**, com
+menos gente do que você pediu, e o progresso avança por cima dessas pessoas.
+
 **O que fazer:** confira no iPhone quantos destinatários a lista tem. Depois é só
 rodar de novo: a próxima lista continua automaticamente do contato seguinte.
 Esta parada é **normal** e não é erro.
 
 ### "Parou por uma regra da estação" (o código 7)
 
-**O que aconteceu:** a estação parou sozinha por uma regra dela — o motivo exato
-aparece no log como `orcamento de tempo da lista` (tempo máximo da lista
-esgotado, inclusive durante a retomada) ou como uma das paradas por célula
-ilegível (a seção logo abaixo) — e **não** criou lista nenhuma, nem parcial.
-Nada foi perdido: o progresso não avançou.
+**O que aconteceu:** a estação parou sozinha por uma regra dela e **não** criou
+lista nenhuma, nem parcial. O progresso não avançou: ninguém entrou duas vezes e
+ninguém ficou para trás. Os motivos que caem aqui são:
+
+- `orcamento de tempo da lista (durante a retomada)` — o tempo máximo acabou
+  antes de a estação chegar no ponto onde a rodada anterior parou. **Sempre**
+  código 7: nada foi tocado;
+- `orcamento de tempo da lista` **com menos de 2 contatos confirmados** (com 2 ou
+  mais, e o seletor ainda na tela, vira código 6 — lista parcial criada, ver
+  acima);
+- as paradas por célula ilegível (a seção logo abaixo), quando a lista para com
+  menos de 2 confirmados;
+- `contato inalcancavel` — uma linha que não aceitou o toque duas vezes.
+
+A estação tenta fechar o seletor sozinha antes de sair. Se o log disser que não
+conseguiu, **feche o seletor no iPhone** antes da próxima rodada.
 
 Este código é sempre uma **regra da estação**. Se o problema tiver sido o
 WebDriverAgent caindo no meio da seleção ("socket hang up"), a estação **não**
@@ -322,12 +348,18 @@ usa o código 7: ela sai como erro (código 4, tela vermelha) com as instruçõe
 recuperação do WDA. Ler "regra da estação" e rodar de novo contra um WDA morto
 era exatamente o que não podia acontecer.
 
-**O que fazer:** o motivo exato está na última linha do log técnico. Se for o
-tempo máximo, rode de novo (ou aumente `--max-minutos`). Se a rodada seguinte
-parar **no mesmo ponto** (mesmo `proximo_contato_n` no progresso), não é
-lentidão: é uma linha da agenda que nunca devolve nome — veja
-`--pular-celula-ilegivel` (terminal-only; pula essa pessoa e registra no
-progresso que ela não entrou em lista nenhuma).
+**O que fazer:** o motivo exato está na última linha do log técnico. Se a rodada
+seguinte parar **no mesmo ponto** (mesmo `proximo_contato_n` no progresso),
+repetir não resolve — e há **duas** causas possíveis, que o log distingue:
+
+1. **uma linha da agenda que nunca devolve nome** (`celula sem rotulo` / `celula
+   sem posicao legivel`): veja `--pular-celula-ilegivel` na seção abaixo;
+2. **tempo máximo insuficiente para a travessia** (`orcamento de tempo da lista`,
+   com ou sem `(durante a retomada)`, e também `teto de telas`): acontece quando
+   a agenda é grande, o iPhone está lento, ou o filtro de DDD só libera contatos
+   lá no fim da agenda. Aqui `--pular-celula-ilegivel` não muda nada. A estação
+   **sempre** manda o tempo máximo padrão e não tem campo na tela para mudá-lo:
+   é preciso rodar essa rodada pelo Terminal com `--max-minutos` maior.
 
 ### "celula sem rotulo" e "celula sem posicao legivel"
 
@@ -338,13 +370,17 @@ em **duas** leituras seguidas.
 
 **Por que a estação para em vez de seguir:** tocar nas linhas seguintes deixaria
 essa pessoa atrás do ponto de retomada — fora de qualquer lista, hoje e sempre,
-em silêncio. Parando, ela é a próxima da fila na rodada seguinte. Um cabeçalho de
-seção (altura diferente da linha de contato) não para a lista: é ignorado.
+em silêncio. Parando, ela é a próxima da fila na rodada seguinte. Só é ignorada
+(sem parar a lista) a linha **bem mais baixa** que a linha de contato — um
+cabeçalho de seção ("A", "B"), um separador. Uma linha mais alta, ou só um pouco
+mais baixa, para a lista: a altura de uma linha de contato varia de verdade
+(recado que quebra em duas linhas, contato sem recado, Dynamic Type), e na
+dúvida a estação prefere parar a ultrapassar alguém.
 
 **O que fazer:** rode de novo. Se a rodada seguinte parar **no mesmo ponto**
 (mesmo `proximo_contato_n` no progresso), não é lentidão: é essa linha da agenda
 que nunca devolve nome. Aí sim use
-`.venv/bin/python run_ios_scroll.py --trust-profile --pular-celula-ilegivel …`
+`python3 run_ios_scroll.py --trust-profile --pular-celula-ilegivel …`
 (terminal-only): ela é pulada, **não entra em lista nenhuma**, e isso fica
 registrado no progresso.
 
@@ -384,7 +420,7 @@ não reapareceu em duas conferências. Os toques daquela leva ficaram **em dúvi
 pode ter mais gente do que o progresso registra, e esses contatos podem aparecer
 de novo na lista seguinte (repetir é melhor do que deixar alguém de fora, mas
 você precisa saber). A estação avisa isso a cada rodada até você resolver com
-`.venv/bin/python run_ios_scroll.py --resolver-incertos entraram` (se contou no
+`python3 run_ios_scroll.py --resolver-incertos entraram` (se contou no
 iPhone e eles JÁ estão numa lista: bloqueia, nunca mais tocados) ou
 `--resolver-incertos nao-entraram` (mantém na fila). Depois: desligue o
 `--turbo` e continue sem ele.
@@ -440,7 +476,7 @@ bateu.
 
 **O que fazer:** antes de qualquer coisa, **apague no WhatsApp as listas que
 seriam repetidas** (para não duplicar). Depois use
-`.venv/bin/python run_ios_scroll.py --recomecar-do-A`: ele recomeça do primeiro
+`python3 run_ios_scroll.py --recomecar-do-A`: ele recomeça do primeiro
 contato SEM tentar retomada posicional, mas **preserva a guarda** — ninguém que
 já está numa lista anterior é re-tocado. É a saída recomendada, porque não
 duplica. `--reset-progresso` também recomeça do A, mas **apaga essa memória** e
@@ -466,7 +502,7 @@ log.
 **O que quer dizer:** a estação abriu a tela de destinatários e não achou linha
 de contato nenhuma. Normalmente é o WhatsApp que mudou de versão.
 
-**O que fazer:** não force. Rode `.venv/bin/python probe_picker.py` e mande o
+**O que fazer:** não force. Rode `python3 probe_picker.py` e mande o
 resultado ao suporte.
 
 ### "o seletor de contatos desapareceu"

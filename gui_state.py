@@ -611,8 +611,13 @@ _DESFECHOS: dict[int, Desfecho] = {
     7: Desfecho("Parou por uma regra da estação",
                 "A estação parou sozinha por uma regra de segurança (tempo máximo da "
                 "lista, ou uma linha da agenda que não devolveu o nome) e NÃO criou "
-                "lista nenhuma. Nada foi perdido: o progresso não avançou. O motivo "
-                "está na última linha do log técnico.", "atencao"),
+                "lista nenhuma. O progresso não avançou: ninguém foi incluído duas "
+                "vezes e ninguém ficou para trás. Confira o seletor no iPhone antes "
+                "da próxima rodada — a estação tenta fechá-lo sozinha, mas se ele "
+                "ficou aberto com contatos marcados, feche na mão. Se a rodada "
+                "seguinte parar no MESMO ponto, repetir não resolve: o motivo está "
+                "na última linha do log técnico e pode pedir o Terminal (tempo "
+                "máximo maior, ou --pular-celula-ilegivel).", "atencao"),
     8: Desfecho("A lista de recuperação não cabe no tempo máximo",
                 "Depois de --recomecar-do-A (ou de um progresso sem ponto de "
                 "retomada), a estação precisa passar por TODOS os contatos que já "
