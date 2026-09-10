@@ -52,6 +52,11 @@ MIN_RECIPIENTS = 2  # confirmado no Android; a confirmar no iOS
 log = logging.getLogger("spike_ios")
 
 
+def _texto_hash(texto: str) -> str:
+    """Identidade do rotulo sem guardar o rotulo (fica so em memoria)."""
+    return hashlib.sha256(texto.strip().encode()).hexdigest()[:16]
+
+
 def mask(value: str) -> str:
     """Nunca logar nome/numero completo."""
     if not value:
@@ -137,6 +142,17 @@ class IosSpike:
         # (elementResponseAttributes). None = ainda nao se sabe se o driver honra.
         self._attrs_ok: bool | None = None
         self._rotulos_celulas: list | None = None
+        # Camada de seletor (by, val) que achou cada chave DENTRO deste picker.
+        # No iPhone da operadora o accessibility id das celulas devolve sempre
+        # vazio: sem isto, cada contato paga uma consulta perdida (~0,24 s).
+        # Zerado a cada picker novo; vazio na camada lembrada => refaz todas.
+        self._camada_ok: dict[str, tuple] = {}
+        # Rotulo (hash) da celula aceita por single-cell-trust no contato
+        # anterior. Guarda contra tocar duas vezes na MESMA celula quando a
+        # lista ainda nao refiltrou — o 2o toque DESMARCA o anterior e, sem
+        # verificacao de selecao, os dois contatos se perdem em silencio.
+        self._rotulo_anterior_h: str | None = None
+        self.colisoes = 0
         # True somente depois do toque em "Criar" (finish). E isto que o runner
         # grava como lista concluida — nao o estado COMPLETED, que tambem e
         # usado quando nao havia o que criar (menos de 2 selecionados).
@@ -198,12 +214,23 @@ class IosSpike:
 
     def find_all(self, key: str) -> list:
         sel = self.p.selectors[key]
+        lembrada = self._camada_ok.get(key)
+        if lembrada is not None:
+            try:
+                els = self.d.find_elements(*lembrada)
+                if els:
+                    return els
+            except WebDriverException:
+                pass
+            # Vazio ou erro nao e definitivo: refaz todas as camadas.
+            self._camada_ok.pop(key, None)
         for by, val in self._locators(sel):
             try:
                 els = self.d.find_elements(by, val)
             except WebDriverException:
                 continue
             if els:
+                self._camada_ok[key] = (by, val)
                 return els
         return []
 
@@ -280,6 +307,8 @@ class IosSpike:
         # Cada lista abre um picker novo: o que foi cacheado no anterior expirou.
         self._depth_ok = None
         self._search_box = None
+        self._camada_ok.clear()
+        self._rotulo_anterior_h = None
         self._contatos_desde_check = self._CHECAR_INTERVALO
         # A sessao abre VAZIA (autoLaunch=False). Ativa o WhatsApp apenas se
         # ele nao estiver ja em frente — chamar activate_app com o app ja ativo
@@ -433,17 +462,25 @@ class IosSpike:
                 return None  # simplesmente nao ha resultado
             raise UiChanged("o seletor de contatos desapareceu durante a busca")
 
-        exact = self._exact_matches(cells, e164, name)
-        if len(exact) > 1:
-            raise Ambiguous(len(exact))
-        if exact:
-            return exact[0]
+        # ATALHO (uma celula, busca por numero): o filho do telefone nao muda a
+        # decisao. Se casar, esta celula e a escolhida; se nao casar — ou nao
+        # existir, como neste iPhone — o single-cell-trust logo abaixo escolhe a
+        # MESMA celula. Era uma consulta HTTP por contato que nao decidia nada.
+        # Com 2+ celulas o telefone decide qual e a certa e continua sendo lido.
+        if not (e164 and len(cells) == 1):
+            exact = self._exact_matches(cells, e164, name)
+            if len(exact) > 1:
+                raise Ambiguous(len(exact))
+            if exact:
+                return exact[0]
 
         # FALLBACK — single-cell trust:
         # O WhatsApp ja filtrou a lista pelo numero que digitamos (E.164).
         # Se sobrou EXATAMENTE 1 celula e a busca foi por numero, esse e o
         # contato certo — mas SOMENTE se nao for celula de convite.
         if e164 and len(cells) == 1 and not self._is_invite_cell(cells[0]):
+            if self._mesma_celula_de_antes(cells[0]):
+                return None
             log.debug("single-cell-trust: 1 celula apos busca por E.164 "
                       "— formato exibido nao casou, mas o WhatsApp ja filtrou")
             cells[0]._sct = True  # atributo dinamico lido em search_and_select
@@ -452,21 +489,58 @@ class IosSpike:
         return None
 
 
+    def _mesma_celula_de_antes(self, cell) -> bool:
+        """A unica celula na tela e a MESMA que acabamos de selecionar?
+
+        Neste iPhone o rotulo e "Nome, recado" e nao contem o numero, entao
+        todo contato entra por single-cell-trust: se a lista ainda nao tiver
+        refiltrado, tocariamos de novo na celula anterior — o que a DESMARCA e
+        perde dois contatos em silencio (sem --approve-create nao ha verificacao
+        de selecao). Custo no caminho normal: 0 chamadas (o rotulo ja foi lido).
+        So na coincidencia paga uma espera e uma releitura."""
+        rotulo = self._cell_text(cell)
+        if not rotulo or self._rotulo_anterior_h is None:
+            return False
+        if _texto_hash(rotulo) != self._rotulo_anterior_h:
+            return False
+        self.colisoes += 1
+        self.settle(1.5)                      # deixa a lista refiltrar
+        cells = self._find_cells_escalating()
+        if len(cells) != 1:
+            return True                       # mudou: esta busca sera refeita
+        novo = self._cell_text(cells[0])
+        if _texto_hash(novo) != self._rotulo_anterior_h:
+            return True                       # a tela mudou; refazer
+        try:
+            marcada = cells[0].get_attribute("selected") in ("true", True, "1")
+        except WebDriverException:
+            marcada = False
+        if marcada:
+            log.warning("celula identica a anterior e ja marcada: nao toco de novo "
+                        "(a lista provavelmente nao refiltrou a tempo)")
+            return True
+        log.warning("celula com o mesmo rotulo do contato anterior, sem marca de "
+                    "selecao: tratando como contato distinto (homonimo)")
+        return False
+
     def _is_invite_cell(self, cell) -> bool:
         """Retorna True se a celula e 'Convidar para WhatsApp' (nao e contato
-        no picker — clicar nela abre o app de Mensagens do iOS)."""
+        no picker — clicar nela abre o app de Mensagens do iOS).
+
+        Usa o texto da celula (label, ou name/value se o label vier vazio), que
+        _cell_text ja leu e guardou: 0 chamadas no caminho normal. E a mesma
+        confianca no rotulo que _rotulo_convite ja aplica no caminho em lote.
+        So quando NAO ha texto nenhum e que os atributos sao lidos um a um."""
+        txt = self._cell_text(cell)
+        if txt:
+            low = txt.lower()
+            return "convidar" in low or "invite" in low
         for attr in ("label", "name", "value"):
             try:
                 v = cell.get_attribute(attr) or ""
             except WebDriverException:
                 v = ""
             low = v.lower()
-            if "convidar" in low or "invite" in low:
-                return True
-        # fallback: texto agregado da celula
-        txt = self._cell_text(cell)
-        if txt:
-            low = txt.lower()
             if "convidar" in low or "invite" in low:
                 return True
         return False
@@ -636,6 +710,9 @@ class IosSpike:
         self.transition(State.SELECTING)
         if getattr(cell, "_sct", False):
             log.info("caso %s: 1 resultado no picker — selecionando (formato local)", label)
+            self._rotulo_anterior_h = _texto_hash(self._cell_text(cell))
+        else:
+            self._rotulo_anterior_h = None
         before = self._selected_count() if self.verify_selection else -1
         cell.click()
         self.transition(State.VERIFYING)
@@ -684,17 +761,31 @@ class IosSpike:
     # ---------------- deteccao ----------------
 
     def _cell_text(self, cell) -> str:
+        """Texto da celula. O valor fica guardado na propria celula: dentro de
+        uma busca ela e lida por _exact_matches e de novo pelo teste de convite
+        — eram 4 leituras HTTP para a mesma informacao."""
+        guardado = getattr(cell, "_txt", None)
+        if guardado is not None:
+            return guardado
+        txt = ""
         for attr in ("label", "name", "value"):
             try:
                 v = cell.get_attribute(attr)
             except WebDriverException:
                 v = None
             if v:
-                return str(v).strip()
+                txt = str(v).strip()
+                break
+        if not txt:
+            try:
+                txt = (cell.text or "").strip()
+            except WebDriverException:
+                txt = ""
         try:
-            return (cell.text or "").strip()
-        except WebDriverException:
-            return ""
+            cell._txt = txt
+        except AttributeError:
+            pass
+        return txt
 
     def _exact_matches(self, cells, e164: str | None, name: str | None) -> list:
         """Match EXATO: numero normalizado igual OU nome exatamente igual.
@@ -917,7 +1008,10 @@ def _ajustes_experimentais() -> dict:
     ajustes: dict = {}
     digitacao = os.environ.get("LL_DIGITACAO", "200" if tudo else "")
     if digitacao.isdigit() and int(digitacao) > 0:
-        ajustes["typingFrequency"] = int(digitacao)
+        # A chave do driver XCUITest/WDA e maxTypingFrequency (FBSettings.m).
+        # "typingFrequency", usada antes, nao existe: o WDA ignora chaves
+        # desconhecidas em silencio, entao LL_DIGITACAO nunca teve efeito algum.
+        ajustes["maxTypingFrequency"] = int(digitacao)
     if tudo or os.environ.get("LL_ATTRS") == "1":
         ajustes["elementResponseAttributes"] = "name,label,value,rect"
         ajustes["shouldUseCompactResponses"] = False
@@ -980,15 +1074,20 @@ def build_driver(server: str, wda_bundle: str | None, *,
             "customSnapshotTimeout": 15,
             "waitForIdleTimeout": 0,
             "animationCoolOffTimeout": 0,
-            # EXPERIMENTAL (LL_RAPIDO=1): digitacao a 200 chars/s e rotulos na
-            # propria resposta das buscas. Desligado por padrao: uma rodada com
-            # isto ligado deixou contatos sem selecionar no iPhone (em apuracao).
-            **_ajustes_experimentais(),
             "useJSONSource": True,
             "pageSourceExcludedAttributes": "visible,accessible,frame,index",
         })
     except WebDriverException:
         log.warning("nao consegui aplicar settings de velocidade (segue mais lento)")
+    # EXPERIMENTAIS (LL_DIGITACAO / LL_ATTRS / LL_RAPIDO), uma chave por vez:
+    # um WDA que recuse uma delas nao derruba as outras. LL_ATTRS continua
+    # DESLIGADO por padrao: neste iPhone o filho do telefone nao existe, entao
+    # a leitura em lote nao casa e o codigo refaz o caminho celula a celula.
+    for chave, valor in _ajustes_experimentais().items():
+        try:
+            driver.update_settings({chave: valor})
+        except WebDriverException:
+            log.warning("o WDA nao aceitou o ajuste %s; seguindo sem ele", chave)
     return driver
 
 

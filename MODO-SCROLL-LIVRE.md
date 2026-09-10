@@ -184,12 +184,22 @@ De onde saiu o ganho, sem afrouxar trava nenhuma:
   O log agora imprime `busca: N celula(s) na tela` a cada contato: 0 = a
   busca não filtrou (texto digitado incompleto); 2+ = há células a mais.
 - **Modo arquivo (2ª rodada)**: o campo de busca é reaproveitado entre contatos (1 busca a menos); um "não encontrado" não sobe mais a profundidade 14→16→18 (até 8 chamadas) — a profundidade do seletor não muda dentro da lista; a linha "Convidar" é barrada ANTES do clique lendo o rótulo, o que permitiu encurtar a pausa depois do clique (de 1,5×ritmo para 0,5×ritmo). Preset **Máximo** em Configurações leva as pausas ao piso do runner (0,375 s após digitar): use só depois de medir.
+- **Modo arquivo (4ª rodada, 2026-09-10)**: três consultas por contato deixaram de
+  existir, medidas no log do Appium (~0,25 s cada). A camada de seletor que encontra
+  as células é lembrada dentro do picker (neste iPhone o id de acessibilidade sempre
+  volta vazio, e essa tentativa era repetida a cada contato); com **uma** célula na
+  tela o filho do telefone não é mais procurado, porque não muda a decisão — se
+  casasse, escolheria a mesma célula que o single-cell-trust escolhe; e a checagem
+  da linha "Convidar" passou a reaproveitar o rótulo já lido, em vez de reler quatro
+  atributos. Junto veio uma trava nova: se a única célula da tela tiver o mesmo
+  rótulo da que acabou de ser selecionada, a estação **não toca de novo** — o
+  segundo toque desmarcaria o contato anterior e os dois se perderiam em silêncio.
 - **Modo arquivo (1ª rodada)**: a trava do compositor de mensagem fazia até 8 consultas
   por contato (uma por rótulo); agora é 1 consulta com o mesmo critério. A
   profundidade em que as células aparecem é descoberta uma vez por sessão, não
   a cada contato. A verificação "já selecionado" (3 chamadas) só roda quando a
   verificação de seleção está ligada, e ela não está no fluxo validado.
-- **Scroll Livre (3ª rodada)**: nome e posição de todas as células vêm na própria resposta da busca (`elementResponseAttributes`): ler uma tela é 1 chamada em vez de ~15. Se o driver não devolver os atributos, a leitura volta sozinha ao modo célula a célula. A digitação do modo arquivo subiu de 60 para 200 caracteres por segundo (`typingFrequency`).
+- **Scroll Livre (3ª rodada)**: nome e posição de todas as células vêm na própria resposta da busca (`elementResponseAttributes`): ler uma tela é 1 chamada em vez de ~15. Se o driver não devolver os atributos, a leitura volta sozinha ao modo célula a célula. **Correção (2026-09-10):** a digitação NUNCA subiu. A chave enviada era `typingFrequency`, que não existe no driver XCUITest nem no WebDriverAgent — a chave real é `maxTypingFrequency`, e chaves desconhecidas são ignoradas em silêncio. Já corrigida, mas continua desligada por padrão (`LL_DIGITACAO=120` liga). Pela mesma razão, os contatos que ficaram sem selecionar numa rodada com `LL_RAPIDO=1` não podem ter sido causados pela digitação: o suspeito é `LL_ATTRS` (atributos na resposta).
 - **Scroll Livre (rodadas anteriores)**: a checagem de célula "Convidar" fazia 3 a 4 chamadas por
   contato com o rótulo já lido; agora é pelo rótulo, sem chamada. A posição das
   células é lida só na primeira e na última da tela: se a distância entre elas

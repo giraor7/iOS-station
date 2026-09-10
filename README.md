@@ -191,7 +191,7 @@ Para gerar a partir do iPhone: Contatos.app → Exportar vCard → `vcf_to_csv.p
 
 ## Tempo esperado
 
-~2,5 s/contato (medido no Android) ⇒ **~11-15 min por lista de 256**,
+~3,8 s/contato **medido neste iPhone** no modo lista de contatos (Appium, 2026-09-04) ⇒ **~16 min por lista de 256**. Cerca de 2,5 s disso são chamadas ao aparelho e ~1 s são pausas. As três consultas retiradas em 2026-09-10 devem levar a ~3 s/contato (~13 min): confirme com `bench_ios.py --with-tap` antes e depois. Um minuto por lista **não é alcançável neste modo**: só limpar o campo, digitar e tocar já custa ~1,55 s por contato, ou 6,6 min por lista, sem contar a leitura da tela.
 **~8-10 h** para 10 mil contatos num aparelho. Aparelhos em paralelo ≈ tempo de um.
 Confirme no seu caso com `bench_ios.py`.
 
